@@ -312,6 +312,1160 @@ static void test_codecs(void) {
     cw_world_destroy(&w);
 }
 
+static void test_byte_writer(void) {
+    cw_writer w;
+    /* growable: never fails, grows, releases */
+    cw_writer_init(&w);
+    CHECK(w.owned && cw_writer_size(&w) == 0 && cw_writer_ok(&w));
+    CHECK(cw_writer_u8(&w, 0x01) && cw_writer_u16(&w, 0x0302) && cw_writer_u32(&w, 0x07060504));
+    CHECK(cw_writer_u64(&w, UINT64_C(0x0f0e0d0c0b0a0908)));
+    CHECK(cw_writer_i8(&w, -1) && cw_writer_i16(&w, -2) && cw_writer_i32(&w, -3) && cw_writer_i64(&w, -4));
+    CHECK(cw_writer_f32(&w, 1.0f) && cw_writer_f64(&w, -2.0));
+    CHECK(cw_writer_bytes(&w, "ab", 2) && cw_writer_bytes(&w, NULL, 0) && !cw_writer_bytes(&w, NULL, 1));
+    static const unsigned char expected[] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0xff, 0xfe, 0xff, 0xfd, 0xff, 0xff, 0xff, 0xfc, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 'a', 'b'
+    };
+    CHECK(w.size == sizeof(expected) && memcmp(w.data, expected, sizeof(expected)) == 0);
+    CHECK(cw_writer_patch_u32(&w, 1, 0xaabbccdd) && w.data[1] == 0xdd && w.data[4] == 0xaa);
+    CHECK(cw_writer_patch_u64(&w, w.size - 8, 0) && w.data[w.size - 1] == 0);
+    CHECK(!cw_writer_patch_u32(&w, w.size - 3, 0) && !cw_writer_patch_u64(&w, w.size, 0));
+    CHECK(!cw_writer_patch_u32(&w, SIZE_MAX, 0));
+    size_t before = w.capacity;
+    for (int i = 0; i < 100000; ++i) CHECK(cw_writer_u8(&w, (uint8_t)i));
+    CHECK(w.size == sizeof(expected) + 100000 && w.capacity > before && w.data[w.size - 1] == (unsigned char)99999);
+    unsigned char *claimed = cw_writer_claim(&w, 3);
+    CHECK(claimed && claimed == w.data + w.size - 3);
+    cw_writer_clear(&w);
+    CHECK(w.size == 0 && w.capacity > 0 && w.data != NULL);
+    cw_writer_reserve(&w, 1);
+    CHECK(w.capacity > 1);
+    CHECK(cw_writer_u8(&w, 9));
+    size_t released_size = 77;
+    unsigned char *released = cw_writer_release(&w, &released_size);
+    CHECK(released && released_size == 1 && released[0] == 9);
+    CHECK(w.data == NULL && w.size == 0 && w.owned);
+    free(released);
+    CHECK(cw_writer_release(&w, &released_size) == NULL && released_size == 0);
+    cw_writer_destroy(&w);
+    CHECK(w.data == NULL && !w.owned);
+    cw_writer_destroy(&w);
+
+    /* fixed: sticky overflow, exact fit, required size keeps counting */
+    unsigned char storage[8];
+    memset(storage, 0xee, sizeof(storage));
+    cw_writer_init_fixed(&w, storage, 6);
+    CHECK(!w.owned && cw_writer_u32(&w, 1) && cw_writer_u16(&w, 2) && cw_writer_ok(&w) && w.size == 6);
+    CHECK(!cw_writer_u8(&w, 3) && !cw_writer_ok(&w) && w.size == 7);
+    CHECK(!cw_writer_bytes(&w, "xyz", 3) && w.size == 10 && storage[6] == 0xee);
+    CHECK(cw_writer_claim(&w, 0) == NULL && w.size == 10);
+    CHECK(cw_writer_patch_u32(&w, 0, 5) && storage[0] == 5);
+    CHECK(!cw_writer_patch_u32(&w, 4, 5) && storage[4] == 2 && storage[6] == 0xee);
+    cw_writer_clear(&w);
+    CHECK(cw_writer_ok(&w) && w.size == 0 && cw_writer_u8(&w, 1));
+    CHECK(cw_writer_release(&w, NULL) == NULL);
+    cw_writer_reserve(&w, 100);
+    CHECK(w.capacity == 6);
+    cw_writer_destroy(&w);
+    cw_writer_init_fixed(&w, storage, 0);
+    CHECK(!cw_writer_u8(&w, 1) && w.size == 1 && storage[0] == 1);
+    CHECK(cw_writer_claim(&w, 0) == NULL);
+
+    /* measuring: counts only */
+    cw_writer_init_fixed(&w, NULL, 99);
+    CHECK(w.capacity == 0 && w.data == NULL);
+    CHECK(cw_writer_u64(&w, 1) && cw_writer_bytes(&w, "abc", 3) && w.size == 11 && cw_writer_ok(&w));
+    CHECK(cw_writer_claim(&w, 5) == NULL && w.size == 16);
+    CHECK(cw_writer_patch_u32(&w, 12, 1) && !cw_writer_patch_u32(&w, 13, 1));
+    /* the byte counter itself is overflow-checked */
+    w.size = SIZE_MAX - 2;
+    CHECK(cw_writer_u16(&w, 1) && w.size == SIZE_MAX);
+    CHECK(!cw_writer_u8(&w, 1) && w.size == SIZE_MAX && !cw_writer_ok(&w));
+    CHECK(cw_writer_claim(&w, 1) == NULL && w.size == SIZE_MAX);
+    CHECK(!cw_writer_patch_u32(&w, SIZE_MAX - 3, 0) && !cw_writer_patch_u64(&w, SIZE_MAX - 7, 0));
+    CHECK(cw_writer_patch_u64(&w, SIZE_MAX - 8, 0));
+    cw_writer_destroy(&w);
+
+    /* NULL safety */
+    CHECK(!cw_writer_u8(NULL, 1) && !cw_writer_bytes(NULL, "a", 1) && cw_writer_claim(NULL, 1) == NULL);
+    CHECK(cw_writer_size(NULL) == 0 && !cw_writer_ok(NULL) && cw_writer_release(NULL, NULL) == NULL);
+    CHECK(!cw_writer_patch_u32(NULL, 0, 0));
+    cw_writer_clear(NULL);
+    cw_writer_reserve(NULL, 1);
+    cw_writer_destroy(NULL);
+}
+
+static void test_byte_reader(void) {
+    static const unsigned char image[] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0xff, 0xfe, 0xff, 0xfd, 0xff, 0xff, 0xff, 0xfc, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 'a', 'b'
+    };
+    cw_reader r = cw_reader_make(image, sizeof(image));
+    uint8_t u8; uint16_t u16; uint32_t u32; uint64_t u64;
+    int8_t i8; int16_t i16; int32_t i32; int64_t i64;
+    float f32; double f64;
+    char text[2];
+    CHECK(cw_reader_ok(&r) && cw_reader_remaining(&r) == sizeof(image) && !cw_reader_at_end(&r));
+    CHECK(cw_reader_u8(&r, &u8) && u8 == 0x01);
+    CHECK(cw_reader_u16(&r, &u16) && u16 == 0x0302);
+    CHECK(cw_reader_u32(&r, &u32) && u32 == 0x07060504);
+    CHECK(cw_reader_u64(&r, &u64) && u64 == UINT64_C(0x0f0e0d0c0b0a0908));
+    CHECK(cw_reader_i8(&r, &i8) && i8 == -1);
+    CHECK(cw_reader_i16(&r, &i16) && i16 == -2);
+    CHECK(cw_reader_i32(&r, &i32) && i32 == -3);
+    CHECK(cw_reader_i64(&r, &i64) && i64 == -4);
+    CHECK(cw_reader_f32(&r, &f32) && f32 == 1.0f);
+    CHECK(cw_reader_f64(&r, &f64) && f64 == -2.0);
+    CHECK(cw_reader_remaining(&r) == 2 && cw_reader_view(&r, 0) == image + sizeof(image) - 2);
+    CHECK(cw_reader_bytes(&r, text, 2) && text[0] == 'a' && text[1] == 'b');
+    CHECK(cw_reader_at_end(&r) && cw_reader_remaining(&r) == 0 && cw_reader_bytes(&r, NULL, 0));
+    CHECK(cw_reader_skip(&r, 0) && cw_reader_ok(&r));
+    /* out of bounds: fails, sticks, zeroes the output, keeps the position */
+    u8 = 9;
+    CHECK(!cw_reader_u8(&r, &u8) && u8 == 0 && !cw_reader_ok(&r) && !cw_reader_at_end(&r));
+    CHECK(r.offset == sizeof(image) && cw_reader_remaining(&r) == 0);
+    CHECK(!cw_reader_skip(&r, 0) && !cw_reader_bytes(&r, text, 0) && cw_reader_view(&r, 0) == NULL);
+    cw_reader sub = cw_reader_make(image, 1);
+    CHECK(!cw_reader_sub(&r, 0, &sub) && sub.data == NULL && sub.size == 0);
+
+    /* extremes of the signed ranges */
+    static const unsigned char edges[] = {
+        0x80, 0x7f, 0x00, 0x80, 0xff, 0x7f, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0x7f,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f
+    };
+    r = cw_reader_make(edges, sizeof(edges));
+    CHECK(cw_reader_i8(&r, &i8) && i8 == INT8_MIN && cw_reader_i8(&r, &i8) && i8 == INT8_MAX);
+    CHECK(cw_reader_i16(&r, &i16) && i16 == INT16_MIN && cw_reader_i16(&r, &i16) && i16 == INT16_MAX);
+    CHECK(cw_reader_i32(&r, &i32) && i32 == INT32_MIN && cw_reader_i32(&r, &i32) && i32 == INT32_MAX);
+    CHECK(cw_reader_i64(&r, &i64) && i64 == INT64_MIN && cw_reader_i64(&r, &i64) && i64 == INT64_MAX);
+    CHECK(cw_reader_at_end(&r));
+
+    /* skips and views cannot wrap past the end */
+    r = cw_reader_make(image, sizeof(image));
+    CHECK(!cw_reader_skip(&r, SIZE_MAX) && !cw_reader_ok(&r) && r.offset == 0);
+    r = cw_reader_make(image, sizeof(image));
+    CHECK(cw_reader_skip(&r, sizeof(image) - 1) && !cw_reader_view(&r, 2) && r.offset == sizeof(image) - 1);
+    r = cw_reader_make(image, sizeof(image));
+    CHECK(!cw_reader_sub(&r, sizeof(image) + 1, &sub) && sub.size == 0 && !cw_reader_ok(&sub));
+    r = cw_reader_make(image, sizeof(image));
+    CHECK(!cw_reader_u64(&r, NULL) && cw_reader_ok(&r) && r.offset == 0);
+    CHECK(!cw_reader_bytes(&r, NULL, 1) && cw_reader_ok(&r));
+
+    /* sub-readers are bounded to their span and leave the parent past it */
+    r = cw_reader_make(image, sizeof(image));
+    CHECK(cw_reader_skip(&r, 1) && cw_reader_sub(&r, 2, &sub));
+    CHECK(r.offset == 3 && sub.size == 2 && sub.data == image + 1);
+    CHECK(cw_reader_u16(&sub, &u16) && u16 == 0x0302 && cw_reader_at_end(&sub));
+    CHECK(!cw_reader_u8(&sub, &u8) && cw_reader_ok(&r));
+    CHECK(cw_reader_sub(&r, 0, &sub) && sub.size == 0 && cw_reader_at_end(&sub) && r.offset == 3);
+
+    /* empty and invalid ranges */
+    r = cw_reader_make(NULL, 0);
+    CHECK(cw_reader_ok(&r) && cw_reader_at_end(&r) && cw_reader_remaining(&r) == 0);
+    CHECK(cw_reader_skip(&r, 0) && !cw_reader_u8(&r, &u8));
+    r = cw_reader_make(NULL, 5);
+    CHECK(!cw_reader_ok(&r) && r.size == 0 && !cw_reader_skip(&r, 0) && !cw_reader_at_end(&r));
+    CHECK(!cw_reader_u8(NULL, &u8) && !cw_reader_skip(NULL, 0) && cw_reader_remaining(NULL) == 0);
+    CHECK(!cw_reader_ok(NULL) && !cw_reader_at_end(NULL) && cw_reader_view(NULL, 0) == NULL);
+    CHECK(!cw_reader_sub(&r, 0, NULL));
+
+    /* writer and reader agree on every width */
+    cw_writer w;
+    cw_writer_init(&w);
+    for (int i = 0; i < 1000; ++i) {
+        CHECK(cw_writer_i64(&w, (int64_t)i * -1234567891011LL) && cw_writer_f64(&w, i * 0.25));
+        CHECK(cw_writer_i32(&w, -i) && cw_writer_f32(&w, (float)i) && cw_writer_i16(&w, (int16_t)-i));
+    }
+    r = cw_reader_make(w.data, w.size);
+    for (int i = 0; i < 1000; ++i) {
+        CHECK(cw_reader_i64(&r, &i64) && i64 == (int64_t)i * -1234567891011LL);
+        CHECK(cw_reader_f64(&r, &f64) && f64 == i * 0.25);
+        CHECK(cw_reader_i32(&r, &i32) && i32 == -i && cw_reader_f32(&r, &f32) && f32 == (float)i);
+        CHECK(cw_reader_i16(&r, &i16) && i16 == (int16_t)-i);
+    }
+    CHECK(cw_reader_at_end(&r));
+    cw_writer_destroy(&w);
+}
+
+/* Snapshot fixtures: a position encoded by a codec built on the byte
+ * primitives, a variable-length label, a raw int64, a tag and a transient. */
+typedef struct { float x, y; } snap_pos;
+typedef struct { char text[16]; } snap_label;
+static bool marshal_should_fail, unmarshal_should_fail;
+static const char *unmarshal_reject_text;   /* a label the codec refuses, or NULL */
+static bool marshal_pos(cw_world *w, cw_entity_id id, cw_component_id ct,
+                        void *data, size_t capacity, size_t *size) {
+    const snap_pos *p = cw_comp_ptr(w, id, ct);
+    cw_writer wr;
+    cw_writer_init_fixed(&wr, data, capacity);
+    cw_writer_f32(&wr, p->x);
+    cw_writer_f32(&wr, p->y);
+    *size = wr.size;
+    return cw_writer_ok(&wr);
+}
+static bool unmarshal_pos(cw_world *w, cw_entity_id id, cw_component_id ct,
+                          const void *data, size_t size) {
+    cw_reader r = cw_reader_make(data, size);
+    snap_pos p;
+    if (!cw_reader_f32(&r, &p.x) || !cw_reader_f32(&r, &p.y) || !cw_reader_at_end(&r)) return false;
+    *(snap_pos *)cw_comp_ptr(w, id, ct) = p;
+    return true;
+}
+static bool marshal_label(cw_world *w, cw_entity_id id, cw_component_id ct,
+                          void *data, size_t capacity, size_t *size) {
+    const snap_label *l = cw_comp_ptr(w, id, ct);
+    if (marshal_should_fail) return false;
+    cw_writer wr;
+    cw_writer_init_fixed(&wr, data, capacity);
+    cw_writer_u8(&wr, (uint8_t)strlen(l->text));
+    cw_writer_bytes(&wr, l->text, strlen(l->text));
+    *size = wr.size;
+    return cw_writer_ok(&wr);
+}
+static bool unmarshal_label(cw_world *w, cw_entity_id id, cw_component_id ct,
+                            const void *data, size_t size) {
+    cw_reader r = cw_reader_make(data, size);
+    uint8_t length;
+    snap_label l = {{0}};
+    if (unmarshal_should_fail || !cw_reader_u8(&r, &length) || length >= sizeof(l.text)) return false;
+    if (!cw_reader_bytes(&r, l.text, length) || !cw_reader_at_end(&r)) return false;
+    if (unmarshal_reject_text && strcmp(l.text, unmarshal_reject_text) == 0) return false;
+    *(snap_label *)cw_comp_ptr(w, id, ct) = l;
+    return true;
+}
+enum { SNAP_POS, SNAP_LABEL, SNAP_HP, SNAP_TAG, SNAP_NOTE, SNAP_KINDS };
+/* Registers the fixture schema at the given component ids; Health takes an
+ * optional cleanup callback so tests can count releases. */
+static void snap_register_clear(cw_world *w, const cw_component_id ids[SNAP_KINDS], cw_component_fn clear) {
+    cw_codec pos = {marshal_pos, unmarshal_pos}, label = {marshal_label, unmarshal_label};
+    CHECK(cw_comp_register(w, ids[SNAP_POS], sizeof(snap_pos), _Alignof(snap_pos), "Position", NULL));
+    CHECK(cw_comp_set_codec(w, ids[SNAP_POS], pos));
+    CHECK(cw_comp_register(w, ids[SNAP_LABEL], sizeof(snap_label), 1, "Label", NULL));
+    CHECK(cw_comp_set_codec(w, ids[SNAP_LABEL], label));
+    CHECK(cw_comp_register(w, ids[SNAP_HP], sizeof(int64_t), _Alignof(int64_t), "Health", clear));
+    CHECK(cw_comp_register(w, ids[SNAP_TAG], 0, 1, "Tag", NULL));
+    CHECK(cw_comp_register(w, ids[SNAP_NOTE], sizeof(int64_t), _Alignof(int64_t), "Note", NULL));
+    CHECK(cw_comp_set_transient(w, ids[SNAP_NOTE], true));
+}
+static void snap_register(cw_world *w, const cw_component_id ids[SNAP_KINDS]) {
+    snap_register_clear(w, ids, NULL);
+}
+static const cw_component_id snap_ids_a[SNAP_KINDS] = {0, 5, 64, 130, 191};
+static const cw_component_id snap_ids_b[SNAP_KINDS] = {191, 3, 7, 64, 0};
+/* Populates a world with holes, a pending destruction and recycled ids. */
+static void snap_populate(cw_world *w, const cw_component_id ids[SNAP_KINDS]) {
+    w->recycle_ids = true;
+    for (int i = 0; i < 12; ++i) {
+        cw_entity_id id = cw_world_create_entity(w);
+        snap_pos p = {(float)i, (float)-i * 0.5f};
+        snap_label l = {{0}};
+        int64_t hp = 100 - i, note = 1000 + i;
+        snprintf(l.text, sizeof(l.text), "e%d", i);
+        if (i % 2 == 0) CHECK(cw_comp_set(w, id, ids[SNAP_POS], &p, sizeof(p)));
+        if (i % 3 == 0) CHECK(cw_comp_set(w, id, ids[SNAP_LABEL], &l, sizeof(l)));
+        if (i % 4 != 1) CHECK(cw_comp_set(w, id, ids[SNAP_HP], &hp, sizeof(hp)));
+        if (i % 5 == 0) CHECK(cw_comp_add(w, id, ids[SNAP_TAG]));
+        CHECK(cw_comp_set(w, id, ids[SNAP_NOTE], &note, sizeof(note)));
+    }
+    cw_world_mark_destroy(w, 3);
+    cw_world_mark_destroy(w, 7);
+    cw_world_mark_destroy(w, 1);
+    cw_world_sweep(w);                    /* recycled: 3, 7, 1 */
+    CHECK(cw_world_restore_entity(w, 40));
+    cw_world_mark_destroy(w, 9);          /* pending at save time */
+    w->tick = 99;
+    w->created.count = 0;
+}
+/* Compares the loaded world with the populated one component by component. */
+static void snap_expect_populated(cw_world *w, const cw_component_id ids[SNAP_KINDS], bool note_present) {
+    CHECK(cw_world_entity_count(w) == 10 && w->next_id == 41 && w->last_created == 40 && w->tick == 99);
+    CHECK(w->recycle_ids && w->recycled_ids.count == 3);
+    CHECK(w->recycled_ids.data[0] == 3 && w->recycled_ids.data[1] == 7 && w->recycled_ids.data[2] == 1);
+    CHECK(w->pending_destroy.count == 1 && w->pending_destroy.data[0] == 9);
+    CHECK(!cw_world_is_valid(w, 1) && !cw_world_is_valid(w, 3) && !cw_world_is_valid(w, 7));
+    CHECK(cw_world_is_valid(w, 40) && cw_sig_empty(w->entities[40].signature));
+    for (int i = 0; i < 12; ++i) {
+        if (i == 1 || i == 3 || i == 7) continue;
+        CHECK(cw_world_is_valid(w, i));
+        CHECK(((w->entities[i].flags & CW_TO_DESTROY) != 0) == (i == 9));
+        CHECK(cw_comp_has(w, i, ids[SNAP_POS]) == (i % 2 == 0));
+        if (i % 2 == 0) {
+            const snap_pos *p = cw_comp_ptr(w, i, ids[SNAP_POS]);
+            CHECK(p->x == (float)i && p->y == (float)-i * 0.5f);
+        }
+        CHECK(cw_comp_has(w, i, ids[SNAP_LABEL]) == (i % 3 == 0));
+        if (i % 3 == 0) {
+            char expected[16];
+            snprintf(expected, sizeof(expected), "e%d", i);
+            CHECK(strcmp(((const snap_label *)cw_comp_ptr(w, i, ids[SNAP_LABEL]))->text, expected) == 0);
+        }
+        CHECK(cw_comp_has(w, i, ids[SNAP_HP]) == (i % 4 != 1));
+        if (i % 4 != 1) CHECK(*(const int64_t *)cw_comp_ptr(w, i, ids[SNAP_HP]) == 100 - i);
+        CHECK(cw_comp_has(w, i, ids[SNAP_TAG]) == (i % 5 == 0));
+        CHECK(cw_comp_has(w, i, ids[SNAP_NOTE]) == note_present);
+        if (note_present) CHECK(*(const int64_t *)cw_comp_ptr(w, i, ids[SNAP_NOTE]) == 1000 + i);
+    }
+}
+static cw_snapshot_save_config snap_save_config(bool include_transient) {
+    cw_snapshot_save_config c = {0};
+    c.allow_raw = true;
+    c.include_transient = include_transient;
+    c.user_version = 7;
+    return c;
+}
+static cw_snapshot_load_config snap_load_config(void) {
+    cw_snapshot_load_config c = cw_snapshot_load_defaults();
+    c.allow_raw = true;
+    c.max_entity_id = 100000;            /* keeps corrupted ids from committing much memory */
+    return c;
+}
+static void test_snapshot_roundtrip(void) {
+    cw_world a, b, c;
+    cw_writer image, measure, fixed;
+    cw_snapshot_error error;
+    cw_snapshot_info info;
+    cw_snapshot_save_config save = snap_save_config(false);
+    cw_snapshot_load_config load = snap_load_config();
+    cw_world_init(&a, NULL);
+    snap_register(&a, snap_ids_a);
+    snap_populate(&a, snap_ids_a);
+
+    /* growable, measuring and exactly-sized fixed writers agree */
+    cw_writer_init(&image);
+    CHECK(cw_snapshot_save(&a, &save, &image, &error) && error.status == CW_SNAPSHOT_OK);
+    CHECK(image.size > 24 && memcmp(image.data, "CWSN", 4) == 0 && image.data[4] == 1 && image.data[5] == 0);
+    cw_writer_init_fixed(&measure, NULL, 0);
+    CHECK(cw_snapshot_save(&a, &save, &measure, NULL) && measure.size == image.size);
+    unsigned char *storage = malloc(image.size + 1);
+    cw_writer_init_fixed(&fixed, storage, image.size);
+    CHECK(cw_snapshot_save(&a, &save, &fixed, &error) && fixed.size == image.size);
+    CHECK(memcmp(storage, image.data, image.size) == 0);
+    cw_writer_init_fixed(&fixed, storage, image.size - 1);
+    CHECK(!cw_snapshot_save(&a, &save, &fixed, &error));
+    CHECK(error.status == CW_SNAPSHOT_ERROR_OVERFLOW && error.offset == image.size);
+    CHECK(fixed.size == 0 && cw_writer_ok(&fixed));
+    /* appending after existing content keeps the prefix; failure restores it */
+    cw_writer_init(&measure);
+    CHECK(cw_writer_bytes(&measure, "prefix", 6));
+    CHECK(cw_snapshot_save(&a, &save, &measure, NULL) && measure.size == image.size + 6);
+    CHECK(memcmp(measure.data, "prefix", 6) == 0 && memcmp(measure.data + 6, image.data, image.size) == 0);
+    marshal_should_fail = true;
+    CHECK(!cw_snapshot_save(&a, &save, &measure, &error) && measure.size == image.size + 6);
+    CHECK(error.status == CW_SNAPSHOT_ERROR_MARSHAL && error.entity == 0 && error.component == snap_ids_a[SNAP_LABEL]);
+    CHECK(strcmp(error.name, "Label") == 0 && strcmp(cw_snapshot_status_string(error.status), "marshal failed") == 0);
+    marshal_should_fail = false;
+    cw_writer_destroy(&measure);
+
+    /* peek reads the header without a schema */
+    CHECK(cw_snapshot_peek(image.data, image.size, &info, &error) && error.status == CW_SNAPSHOT_OK);
+    CHECK(info.format_version == CW_SNAPSHOT_FORMAT_VERSION && info.user_version == 7 && info.size == image.size);
+    CHECK(info.tick == 99 && info.next_id == 41 && info.entity_count == 10 && info.recycled_count == 3);
+    CHECK(info.component_count == 4 && info.flags == 0);
+    CHECK(cw_snapshot_peek(image.data, image.size, NULL, NULL));
+
+    /* load into a world whose schema uses different component ids */
+    cw_world_init(&b, NULL);
+    snap_register(&b, snap_ids_b);
+    cw_cached_query *healthy = cw_query_create(&b, cw_filter_all(value_mask(snap_ids_b[SNAP_HP])));
+    cw_observer *labels = cw_observer_create(&b, snap_ids_b[SNAP_LABEL]);
+    CHECK(cw_snapshot_load(&b, image.data, image.size, &load, &error) && error.status == CW_SNAPSHOT_OK);
+    snap_expect_populated(&b, snap_ids_b, false);
+    CHECK(cw_query_count(healthy) == 7 && !cw_query_contains(healthy, 9));
+    cw_observer_observe(labels);
+    CHECK(cw_observer_count(labels, CW_CHANGE_ADDED) == 3);
+    cw_id_view created = cw_world_created(&b);
+    CHECK(created.count == 10 && created.data[0] == 0 && created.data[9] == 40);
+    /* the id allocator continues exactly as the saved world would */
+    for (int i = 0; i < 6; ++i) CHECK(cw_world_create_entity(&a) == cw_world_create_entity(&b));
+    CHECK(b.next_id == 44 && b.recycled_ids.count == 0);
+    cw_query_destroy(healthy);
+    cw_observer_destroy(labels);
+
+    /* a world registered like the original re-saves the identical image */
+    cw_world_init(&c, NULL);
+    snap_register(&c, snap_ids_a);
+    CHECK(cw_snapshot_load(&c, image.data, image.size, &load, &error));
+    cw_writer_init(&measure);
+    CHECK(cw_snapshot_save(&c, &save, &measure, NULL));
+    CHECK(measure.size == image.size && memcmp(measure.data, image.data, image.size) == 0);
+    cw_writer_destroy(&measure);
+    cw_world_destroy(&c);
+
+    /* transient components travel only on request */
+    save = snap_save_config(true);
+    cw_writer_clear(&image);
+    cw_world_reset(&a);
+    snap_populate(&a, snap_ids_a);
+    CHECK(cw_snapshot_save(&a, &save, &image, &error));
+    CHECK(cw_snapshot_peek(image.data, image.size, &info, NULL) && info.component_count == 5);
+    cw_world_reset(&b);
+    CHECK(cw_snapshot_load(&b, image.data, image.size, &load, &error));
+    snap_expect_populated(&b, snap_ids_b, true);
+
+    /* an empty world round-trips too */
+    cw_world_reset(&a);
+    a.recycle_ids = false;
+    cw_writer_clear(&image);
+    CHECK(cw_snapshot_save(&a, NULL, &image, &error));
+    cw_world_reset(&b);
+    CHECK(cw_snapshot_load(&b, image.data, image.size, NULL, &error));
+    CHECK(cw_world_entity_count(&b) == 0 && b.next_id == 0 && !b.recycle_ids && b.tick == 0);
+    CHECK(cw_snapshot_peek(image.data, image.size, &info, NULL) && info.entity_count == 0 && info.component_count == 0);
+
+    free(storage);
+    cw_writer_destroy(&image);
+    cw_world_destroy(&a);
+    cw_world_destroy(&b);
+}
+
+/* Locates a section payload in an image by walking the documented layout. */
+static size_t snap_find_section(const unsigned char *data, size_t size, const char *tag, size_t *length) {
+    cw_reader r = cw_reader_make(data, size);
+    uint32_t count, found;
+    uint64_t span;
+    CHECK(cw_reader_skip(&r, 20) && cw_reader_u32(&r, &count));
+    for (uint32_t i = 0; i < count; ++i) {
+        CHECK(cw_reader_u32(&r, &found) && cw_reader_u64(&r, &span));
+        if (found == ((uint32_t)tag[0] | (uint32_t)tag[1] << 8 | (uint32_t)tag[2] << 16 | (uint32_t)tag[3] << 24)) {
+            *length = (size_t)span;
+            return r.offset;
+        }
+        CHECK(cw_reader_skip(&r, (size_t)span));
+    }
+    *length = 0;
+    return SIZE_MAX;
+}
+static void snap_expect_fresh(const cw_world *w) {
+    CHECK(cw_world_entity_count(w) == 0 && w->next_id == 0 && w->recycled_ids.count == 0);
+    CHECK(w->pending_destroy.count == 0);
+}
+static bool snap_load_copy(cw_world *w, const unsigned char *data, size_t size,
+                           const cw_snapshot_load_config *config, cw_snapshot_error *error) {
+    bool ok = cw_snapshot_load(w, data, size, config, error);
+    if (!ok) snap_expect_fresh(w);
+    return ok;
+}
+static void test_snapshot_validation(void) {
+    cw_world a, b;
+    cw_writer image;
+    cw_snapshot_error error;
+    cw_snapshot_save_config save = snap_save_config(false);
+    cw_snapshot_load_config load = snap_load_config();
+    cw_world_init(&a, NULL);
+    snap_register(&a, snap_ids_a);
+    snap_populate(&a, snap_ids_a);
+    cw_writer_init(&image);
+
+    /* save-side policy */
+    cw_snapshot_save_config strict = {0};
+    CHECK(!cw_snapshot_save(&a, &strict, &image, &error) && image.size == 0);
+    CHECK(error.status == CW_SNAPSHOT_ERROR_NO_CODEC && error.component == snap_ids_a[SNAP_HP]);
+    CHECK(strcmp(error.name, "Health") == 0 && error.entity == CW_INVALID_ENTITY);
+    CHECK(!cw_snapshot_save(NULL, &save, &image, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_snapshot_save(&a, &save, NULL, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_snapshot_save(NULL, NULL, NULL, NULL));
+    CHECK(cw_snapshot_save(&a, &save, &image, &error));
+    const unsigned char *data = image.data;
+    size_t size = image.size;
+    for (int status = CW_SNAPSHOT_OK; status <= CW_SNAPSHOT_ERROR_UNMARSHAL; ++status)
+        CHECK(strcmp(cw_snapshot_status_string((cw_snapshot_status)status), "unknown status") != 0);
+    CHECK(strcmp(cw_snapshot_status_string((cw_snapshot_status)99), "unknown status") == 0);
+
+    /* load-side arguments and world state */
+    cw_world_init(&b, NULL);
+    snap_register(&b, snap_ids_b);
+    CHECK(!cw_snapshot_load(NULL, data, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_snapshot_load(&b, NULL, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_snapshot_peek(NULL, size, NULL, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_snapshot_peek(NULL, 0, NULL, NULL));
+    cw_world_create_entity(&b);
+    CHECK(!cw_snapshot_load(&b, data, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_WORLD_NOT_FRESH);
+    cw_world_reset(&b);
+    CHECK(snap_load_copy(&b, data, size, &load, &error));
+    CHECK(!cw_snapshot_load(&b, data, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_WORLD_NOT_FRESH);
+    cw_world_reset(&b);
+
+    /* schema resolution */
+    cw_snapshot_load_config variant = load;
+    variant.allow_raw = false;
+    CHECK(!snap_load_copy(&b, data, size, &variant, &error) && error.status == CW_SNAPSHOT_ERROR_SCHEMA);
+    CHECK(error.component == snap_ids_b[SNAP_HP] && strcmp(error.name, "Health") == 0);
+    cw_world other;
+    cw_world_init(&other, NULL);
+    CHECK(cw_comp_register(&other, 9, sizeof(int32_t), 4, "Health", NULL));
+    variant.ignore_unknown_components = true;
+    CHECK(!snap_load_copy(&other, data, size, &variant, &error) && error.status == CW_SNAPSHOT_ERROR_SCHEMA);
+    CHECK(error.component == 9 && strcmp(error.name, "Health") == 0);
+    cw_world_destroy(&other);
+    cw_world_init(&other, NULL);
+    CHECK(cw_comp_register(&other, 2, sizeof(snap_pos), 4, "Position", NULL));
+    CHECK(!snap_load_copy(&other, data, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_SCHEMA);
+    CHECK(error.component == 2 && strcmp(error.name, "Position") == 0);
+    cw_codec pos = {marshal_pos, unmarshal_pos};
+    CHECK(cw_comp_set_codec(&other, 2, pos));
+    CHECK(!snap_load_copy(&other, data, size, &load, &error));
+    CHECK(error.status == CW_SNAPSHOT_ERROR_UNKNOWN_COMPONENT && strcmp(error.name, "Label") == 0);
+    CHECK(error.component == CW_INVALID_COMPONENT && error.offset > 24);
+    variant = load;
+    variant.ignore_unknown_components = true;
+    CHECK(snap_load_copy(&other, data, size, &variant, &error));
+    CHECK(cw_world_entity_count(&other) == 10 && cw_comp_has(&other, 0, 2) && cw_comp_has(&other, 10, 2));
+    CHECK(((const snap_pos *)cw_comp_ptr(&other, 10, 2))->x == 10.0f);
+    CHECK(cw_sig_empty(other.entities[5].signature) && other.next_id == 41);
+    cw_world_destroy(&other);
+
+    /* a codec rejecting its payload leaves the world fresh again */
+    unmarshal_should_fail = true;
+    b.recycle_ids = false;
+    CHECK(!snap_load_copy(&b, data, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_UNMARSHAL);
+    CHECK(error.entity == 0 && error.component == snap_ids_b[SNAP_LABEL] && strcmp(error.name, "Label") == 0);
+    CHECK(!b.recycle_ids && b.tick == 0);
+    unmarshal_should_fail = false;
+    CHECK(snap_load_copy(&b, data, size, &load, &error));
+    cw_world_reset(&b);
+
+    /* limits */
+    variant = load;
+    variant.max_entities = 9;
+    CHECK(!snap_load_copy(&b, data, size, &variant, &error) && error.status == CW_SNAPSHOT_ERROR_LIMIT);
+    variant.max_entities = 10;
+    CHECK(snap_load_copy(&b, data, size, &variant, &error));
+    cw_world_reset(&b);
+    variant = load;
+    variant.max_entity_id = 39;
+    CHECK(!snap_load_copy(&b, data, size, &variant, &error) && error.status == CW_SNAPSHOT_ERROR_LIMIT);
+    variant.max_entity_id = 40;
+    CHECK(snap_load_copy(&b, data, size, &variant, &error));
+    cw_world_reset(&b);
+    variant = load;
+    variant.max_component_bytes = 7;
+    CHECK(!snap_load_copy(&b, data, size, &variant, &error) && error.status == CW_SNAPSHOT_ERROR_LIMIT);
+    variant.max_component_bytes = 8;
+    CHECK(snap_load_copy(&b, data, size, &variant, &error));
+    cw_world_reset(&b);
+    variant = load;
+    variant.max_entities = 2;             /* the recycled list is bounded too */
+    CHECK(!snap_load_copy(&b, data, size, &variant, &error) && error.status == CW_SNAPSHOT_ERROR_LIMIT);
+
+    /* header checks */
+    unsigned char *copy = malloc(size + 16);
+    memcpy(copy, data, size);
+    copy[0] = 'X';
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_MAGIC);
+    CHECK(!cw_snapshot_peek(copy, size, NULL, &error) && error.status == CW_SNAPSHOT_ERROR_MAGIC);
+    memcpy(copy, data, size);
+    copy[4] = 2;
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_VERSION && error.offset == 4);
+    memcpy(copy, data, size);
+    copy[6] = 0x80;
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_VERSION && error.offset == 6);
+    memcpy(copy, data, size);
+    CHECK(!snap_load_copy(&b, copy, size - 1, &load, &error) && error.status == CW_SNAPSHOT_ERROR_TRUNCATED);
+    copy[size] = 0;
+    CHECK(!snap_load_copy(&b, copy, size + 1, &load, &error) && error.status == CW_SNAPSHOT_ERROR_TRAILING_DATA);
+    CHECK(error.offset == size);
+    CHECK(!snap_load_copy(&b, copy, 3, &load, &error) && error.status == CW_SNAPSHOT_ERROR_TRUNCATED);
+    CHECK(!snap_load_copy(&b, copy, 0, &load, &error) && error.status == CW_SNAPSHOT_ERROR_TRUNCATED);
+    cw_writer patch;
+    cw_writer_init_fixed(&patch, copy, size + 16);
+    patch.size = size;
+    CHECK(cw_writer_patch_u64(&patch, 8, 10));
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT && error.offset == 8);
+
+    /* an unknown section is skipped, which keeps the format extensible */
+    memcpy(copy, data, size);
+    patch.size = size;
+    CHECK(cw_writer_u32(&patch, 0x58585858) && cw_writer_u64(&patch, 3) && cw_writer_bytes(&patch, "abc", 3));
+    CHECK(cw_writer_patch_u64(&patch, 8, patch.size) && cw_writer_patch_u32(&patch, 20, 5));
+    CHECK(snap_load_copy(&b, copy, patch.size, &load, &error));
+    snap_expect_populated(&b, snap_ids_b, false);
+    cw_world_reset(&b);
+    CHECK(cw_writer_patch_u64(&patch, 8, patch.size - 3));   /* ... but a short section is not */
+    CHECK(!snap_load_copy(&b, copy, patch.size - 3, &load, &error) && error.status == CW_SNAPSHOT_ERROR_TRUNCATED);
+    memcpy(copy, data, size);
+    memcpy(copy + 24, data + 24 + 12 + 25, 4);              /* the world section tagged as schema */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    CHECK(error.offset == 24 + 12 + 25 + 12);                /* the duplicate is reported */
+    memcpy(copy, data, size);
+    copy[20] = 3;                                            /* a required section is missing */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+
+    /* record-level corruption inside the sections */
+    size_t length, entities = snap_find_section(data, size, "ENTS", &length);
+    size_t world = snap_find_section(data, size, "WRLD", &length);
+    size_t recycled = snap_find_section(data, size, "RCYL", &length);
+    CHECK(entities != SIZE_MAX && world != SIZE_MAX && recycled != SIZE_MAX);
+    CHECK(snap_find_section(data, size, "NOPE", &length) == SIZE_MAX && length == 0);
+    memcpy(copy, data, size);
+    copy[entities + 8 + 8] = 0x10;                            /* unknown entity flag */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[entities + 8] = 2;                                   /* first id 2: order breaks at id 2 */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[entities + 8 + 8 + 1] = 200;                         /* too many components */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[entities + 8 + 8 + 1 + 1] = 77;                      /* undeclared component id */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[entities + 8 + 8 + 1 + 1 + 1] = 200;                 /* payload longer than the section */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[entities] = 9;                                       /* count below the records present */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[world + 8] = 5;                                      /* next_id below a live id */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[world + 24] = 2;                                     /* recycle flag out of range */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[recycled + 8] = 0;                                   /* recycled id is a live entity */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[recycled + 8] = 7;                                   /* duplicate recycled id */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[recycled + 8] = 41;                                  /* recycled id not below next_id */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+    memcpy(copy, data, size);
+    copy[recycled + 8 + 7] = 0x80;                            /* negative recycled id */
+    CHECK(!snap_load_copy(&b, copy, size, &load, &error) && error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+
+    /* every truncation and a flood of random corruptions fail cleanly */
+    for (size_t n = 0; n < size; ++n) {
+        CHECK(!snap_load_copy(&b, data, n, &load, &error));
+        CHECK(error.status == CW_SNAPSHOT_ERROR_TRUNCATED || error.status == CW_SNAPSHOT_ERROR_CORRUPT);
+        CHECK(!cw_snapshot_peek(data, n, NULL, NULL));
+    }
+    uint32_t rng = 0x9e3779b9u;
+    unsigned loaded = 0;
+    for (int round = 0; round < 3000; ++round) {
+        memcpy(copy, data, size);
+        unsigned flips = 1 + (rng >> 28) % 3;
+        for (unsigned f = 0; f < flips; ++f) {
+            rng = rng * 1664525u + 1013904223u;
+            copy[(rng >> 8) % size] ^= (unsigned char)(1u << (rng % 8));
+        }
+        if (snap_load_copy(&b, copy, size, &load, &error)) {
+            ++loaded;
+            cw_world_reset(&b);
+        }
+    }
+    CHECK(loaded > 0);                    /* e.g. a flipped tick still loads */
+    cw_world_reset(&b);
+    CHECK(snap_load_copy(&b, data, size, &load, &error));
+    snap_expect_populated(&b, snap_ids_b, false);
+
+    free(copy);
+    cw_writer_destroy(&image);
+    cw_world_destroy(&a);
+    cw_world_destroy(&b);
+}
+
+/* Decodes a serialized image record by record from the documented layout,
+ * deliberately without cw_snapshot_load or cw_snapshot_peek. */
+static uint32_t serial_tag(const char *tag) {
+    return (uint32_t)tag[0] | (uint32_t)tag[1] << 8 | (uint32_t)tag[2] << 16 | (uint32_t)tag[3] << 24;
+}
+static void serial_expect_section(cw_reader *r, const char *tag, cw_reader *section) {
+    uint32_t found;
+    uint64_t length;
+    CHECK(cw_reader_u32(r, &found) && found == serial_tag(tag));
+    CHECK(cw_reader_u64(r, &length) && length <= cw_reader_remaining(r));
+    CHECK(cw_reader_sub(r, (size_t)length, section));
+}
+static void serial_expect_header(cw_reader *r, size_t size, uint32_t user_version) {
+    unsigned char magic[4];
+    uint16_t version, flags;
+    uint64_t total;
+    uint32_t user, sections;
+    uint16_t one = 1;
+    unsigned char first;
+    memcpy(&first, &one, 1);
+    CHECK(cw_reader_bytes(r, magic, 4) && memcmp(magic, "CWSN", 4) == 0);
+    CHECK(cw_reader_u16(r, &version) && version == CW_SNAPSHOT_FORMAT_VERSION);
+    CHECK(cw_reader_u16(r, &flags) && flags == (first == 0 ? 1 : 0));
+    CHECK(cw_reader_u64(r, &total) && total == size);
+    CHECK(cw_reader_u32(r, &user) && user == user_version);
+    CHECK(cw_reader_u32(r, &sections) && sections == 4);
+    CHECK(r->offset == 24);
+}
+static void serial_expect_schema_entry(cw_reader *r, uint8_t id, uint8_t encoding, uint64_t elem_size, const char *name) {
+    uint8_t found_id, found_encoding;
+    uint64_t found_size;
+    uint16_t length;
+    CHECK(cw_reader_u8(r, &found_id) && found_id == id);
+    CHECK(cw_reader_u8(r, &found_encoding) && found_encoding == encoding);
+    CHECK(cw_reader_u64(r, &found_size) && found_size == elem_size);
+    CHECK(cw_reader_u16(r, &length) && length == strlen(name));
+    const char *text = cw_reader_view(r, length);
+    CHECK(text && memcmp(text, name, length) == 0);
+}
+/* Reads one component record and checks its payload against the fixture. */
+static void serial_expect_component(cw_reader *r, int i, uint8_t *which) {
+    uint32_t length;
+    CHECK(cw_reader_u8(r, which) && cw_reader_u32(r, &length));
+    cw_reader payload;
+    CHECK(cw_reader_sub(r, length, &payload));
+    switch (*which) {
+        case 0: {                                   /* Position: two little-endian f32 */
+            float x, y;
+            CHECK(length == 8 && cw_reader_f32(&payload, &x) && cw_reader_f32(&payload, &y));
+            CHECK(x == (float)i && y == (float)-i * 0.5f);
+            break;
+        }
+        case 5: {                                   /* Label: u8 length + text */
+            char expected[16];
+            uint8_t n;
+            snprintf(expected, sizeof(expected), "e%d", i);
+            CHECK(cw_reader_u8(&payload, &n) && n == strlen(expected) && length == 1u + n);
+            const char *text = cw_reader_view(&payload, n);
+            CHECK(text && memcmp(text, expected, n) == 0);
+            break;
+        }
+        case 64: {                                  /* Health: raw int64 slot bytes */
+            int64_t expected = 100 - i;
+            unsigned char raw[8];
+            CHECK(length == 8 && cw_reader_bytes(&payload, raw, 8) && memcmp(raw, &expected, 8) == 0);
+            break;
+        }
+        case 130: {                                 /* Tag: the one raw byte of a size-0 component */
+            uint8_t byte;
+            CHECK(length == 1 && cw_reader_u8(&payload, &byte) && byte == 0);
+            break;
+        }
+        default: CHECK(*which == 0);                /* anything else (e.g. the transient Note) is a bug */
+    }
+    CHECK(cw_reader_at_end(&payload));
+}
+static void test_world_serialize(void) {
+    cw_world a, b;
+    cw_buffer image;
+    cw_snapshot_error error;
+    cw_serialize_config config = {0};
+    config.allow_raw = true;
+    config.user_version = 5;
+    cw_world_init(&a, NULL);
+    snap_register(&a, snap_ids_a);
+    snap_populate(&a, snap_ids_a);           /* visible: 0 2 4 5 6 8 10 11 40; 9 pending; 1 3 7 gone */
+
+    /* arguments and policy failures allocate nothing */
+    image.data = (unsigned char *)&image;
+    image.size = 7;
+    CHECK(!cw_world_serialize(NULL, &config, &image, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(image.data == NULL && image.size == 0);
+    CHECK(!cw_world_serialize(&a, &config, NULL, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_world_serialize(&a, NULL, &image, &error) && error.status == CW_SNAPSHOT_ERROR_NO_CODEC);
+    CHECK(image.data == NULL && image.size == 0 && strcmp(error.name, "Health") == 0);
+    CHECK(!cw_world_serialize(NULL, NULL, NULL, NULL));
+
+    CHECK(cw_world_serialize(&a, &config, &image, &error) && error.status == CW_SNAPSHOT_OK);
+    CHECK(image.data != NULL && image.size > 24);
+
+    /* header and section framing */
+    cw_reader r = cw_reader_make(image.data, image.size), world, schema, entities, recycled;
+    serial_expect_header(&r, image.size, 5);
+    serial_expect_section(&r, "WRLD", &world);
+    serial_expect_section(&r, "SCHM", &schema);
+    serial_expect_section(&r, "ENTS", &entities);
+    serial_expect_section(&r, "RCYL", &recycled);
+    CHECK(cw_reader_at_end(&r));
+
+    /* world record: tick and next id kept, allocator details neutral */
+    uint64_t tick;
+    int64_t next_id, last_created;
+    uint8_t recycle;
+    CHECK(world.size == 25 && cw_reader_u64(&world, &tick) && tick == 99);
+    CHECK(cw_reader_i64(&world, &next_id) && next_id == 41);
+    CHECK(cw_reader_i64(&world, &last_created) && last_created == CW_INVALID_ENTITY);
+    CHECK(cw_reader_u8(&world, &recycle) && recycle == 1 && cw_reader_at_end(&world));
+
+    /* schema: used, non-transient components by name, ascending saved id */
+    uint16_t schema_count;
+    CHECK(cw_reader_u16(&schema, &schema_count) && schema_count == 4);
+    serial_expect_schema_entry(&schema, 0, 1, sizeof(snap_pos), "Position");
+    serial_expect_schema_entry(&schema, 5, 1, sizeof(snap_label), "Label");
+    serial_expect_schema_entry(&schema, 64, 2, sizeof(int64_t), "Health");
+    serial_expect_schema_entry(&schema, 130, 2, 1, "Tag");
+    CHECK(cw_reader_at_end(&schema));
+
+    /* entity records: visible ids only, ascending, no flags, payloads decoded */
+    static const int64_t visible[] = {0, 2, 4, 5, 6, 8, 10, 11, 40};
+    uint64_t entity_count;
+    CHECK(cw_reader_u64(&entities, &entity_count) && entity_count == 9);
+    for (size_t n = 0; n < 9; ++n) {
+        int64_t id;
+        uint8_t flags, components;
+        CHECK(cw_reader_i64(&entities, &id) && id == visible[n]);
+        CHECK(cw_reader_u8(&entities, &flags) && flags == 0);
+        CHECK(cw_reader_u8(&entities, &components));
+        /* the exact set: Position iff even, Label iff i%3==0, Health iff i%4!=1, Tag iff i%5==0 */
+        int i = (int)id;
+        cw_signature expected = {0}, found = {0};
+        if (i != 40) {
+            if (i % 2 == 0) cw_sig_set(&expected, 0);
+            if (i % 3 == 0) cw_sig_set(&expected, 5);
+            if (i % 4 != 1) cw_sig_set(&expected, 64);
+            if (i % 5 == 0) cw_sig_set(&expected, 130);
+        }
+        int previous = -1;
+        for (unsigned c = 0; c < components; ++c) {
+            uint8_t which;
+            serial_expect_component(&entities, i, &which);
+            CHECK((int)which > previous && cw_sig_set(&found, which));
+            previous = which;
+        }
+        CHECK(memcmp(&found, &expected, sizeof(found)) == 0);
+    }
+    CHECK(cw_reader_at_end(&entities));
+    uint64_t recycled_count;
+    CHECK(recycled.size == 8 && cw_reader_u64(&recycled, &recycled_count) && recycled_count == 0);
+    CHECK(cw_reader_at_end(&recycled));
+
+    /* the image is a valid snapshot: it peeks and loads, pending/recycled gone */
+    cw_snapshot_info info;
+    CHECK(cw_snapshot_peek(image.data, image.size, &info, NULL));
+    CHECK(info.entity_count == 9 && info.recycled_count == 0 && info.component_count == 4 && info.user_version == 5);
+    cw_world_init(&b, NULL);
+    snap_register(&b, snap_ids_b);
+    cw_snapshot_load_config load = snap_load_config();
+    CHECK(cw_snapshot_load(&b, image.data, image.size, &load, &error));
+    CHECK(cw_world_entity_count(&b) == 9 && b.pending_destroy.count == 0 && b.recycled_ids.count == 0);
+    CHECK(b.next_id == 41 && b.tick == 99 && b.recycle_ids && b.last_created == CW_INVALID_ENTITY);
+    CHECK(!cw_world_is_valid(&b, 9) && !cw_world_is_valid(&b, 1) && cw_world_is_valid(&b, 40));
+    CHECK(!cw_comp_has(&b, 0, snap_ids_b[SNAP_NOTE]) && cw_comp_has(&b, 0, snap_ids_b[SNAP_TAG]));
+    CHECK(cw_world_create_entity(&b) == 41);   /* omitted ids are never reused */
+
+    /* ownership: the buffer is the caller's, released once */
+    unsigned char *data = image.data;
+    cw_buffer_free(&image);
+    CHECK(image.data == NULL && image.size == 0);
+    cw_buffer_free(&image);
+    cw_buffer_free(NULL);
+    (void)data;
+
+    /* an empty world serializes to a header and empty sections */
+    cw_world_reset(&a);
+    a.recycle_ids = false;
+    CHECK(cw_world_serialize(&a, NULL, &image, &error) && image.size == 24 + 4 * 12 + 25 + 2 + 8 + 8);
+    r = cw_reader_make(image.data, image.size);
+    serial_expect_header(&r, image.size, 0);
+    serial_expect_section(&r, "WRLD", &world);
+    serial_expect_section(&r, "SCHM", &schema);
+    serial_expect_section(&r, "ENTS", &entities);
+    serial_expect_section(&r, "RCYL", &recycled);
+    CHECK(cw_reader_u64(&world, &tick) && tick == 0 && cw_reader_i64(&world, &next_id) && next_id == 0);
+    CHECK(cw_reader_u16(&schema, &schema_count) && schema_count == 0);
+    CHECK(cw_reader_u64(&entities, &entity_count) && entity_count == 0);
+    CHECK(cw_reader_u64(&recycled, &recycled_count) && recycled_count == 0);
+    cw_buffer_free(&image);
+
+    /* serializing and snapshotting the same visible-only world agree byte for byte */
+    snap_populate(&a, snap_ids_a);
+    cw_world_sweep(&a);                       /* nothing pending any more */
+    a.recycled_ids.count = 0;
+    a.last_created = CW_INVALID_ENTITY;
+    cw_writer full;
+    cw_writer_init(&full);
+    cw_snapshot_save_config save = snap_save_config(false);
+    save.user_version = 0;
+    CHECK(cw_snapshot_save(&a, &save, &full, NULL));
+    CHECK(cw_world_serialize(&a, NULL, &image, &error) == false && error.status == CW_SNAPSHOT_ERROR_NO_CODEC);
+    config.user_version = 0;
+    CHECK(cw_world_serialize(&a, &config, &image, &error));
+    CHECK(image.size == full.size && memcmp(image.data, full.data, full.size) == 0);
+    cw_writer_destroy(&full);
+    cw_buffer_free(&image);
+
+    cw_world_destroy(&a);
+    cw_world_destroy(&b);
+}
+
+/* Builds a sparse world: four entities at widely spaced ids with every
+ * component combination, plus a transient on each. */
+static void sparse_populate(cw_world *w, const cw_component_id ids[SNAP_KINDS]) {
+    static const cw_entity_id sparse[] = {0, 7, 1000, 70000};
+    snap_pos p0 = {1.5f, -2.5f}, p3 = {3.0f, 4.0f};
+    snap_label l0 = {"zero"}, l2 = {"thousand"};
+    int64_t hp0 = 10, hp2 = 20, note = 5;
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(cw_world_restore_entity(w, sparse[i]));
+        CHECK(cw_comp_set(w, sparse[i], ids[SNAP_NOTE], &note, sizeof(note)));
+    }
+    CHECK(cw_comp_set(w, 0, ids[SNAP_POS], &p0, sizeof(p0)) && cw_comp_set(w, 0, ids[SNAP_LABEL], &l0, sizeof(l0)));
+    CHECK(cw_comp_set(w, 0, ids[SNAP_HP], &hp0, sizeof(hp0)) && cw_comp_add(w, 0, ids[SNAP_TAG]));
+    CHECK(cw_comp_add(w, 7, ids[SNAP_TAG]));
+    CHECK(cw_comp_set(w, 1000, ids[SNAP_LABEL], &l2, sizeof(l2)) && cw_comp_set(w, 1000, ids[SNAP_HP], &hp2, sizeof(hp2)));
+    CHECK(cw_comp_set(w, 70000, ids[SNAP_POS], &p3, sizeof(p3)));
+    w->tick = 77;
+    w->created.count = 0;
+}
+static void sparse_expect(cw_world *w, const cw_component_id ids[SNAP_KINDS]) {
+    CHECK(cw_world_entity_count(w) == 4 && w->next_id == 70001 && w->tick == 77);
+    CHECK(w->pending_destroy.count == 0 && w->recycled_ids.count == 0);
+    CHECK(cw_world_is_valid(w, 0) && cw_world_is_valid(w, 7) && cw_world_is_valid(w, 1000) && cw_world_is_valid(w, 70000));
+    CHECK(!cw_world_is_valid(w, 1) && !cw_world_is_valid(w, 6) && !cw_world_is_valid(w, 8));
+    CHECK(!cw_world_is_valid(w, 999) && !cw_world_is_valid(w, 69999) && !cw_world_is_valid(w, 70001));
+    const snap_pos *p = cw_comp_ptr(w, 0, ids[SNAP_POS]);
+    CHECK(cw_comp_has(w, 0, ids[SNAP_POS]) && p->x == 1.5f && p->y == -2.5f);
+    CHECK(cw_comp_has(w, 0, ids[SNAP_LABEL]) && strcmp(((snap_label *)cw_comp_ptr(w, 0, ids[SNAP_LABEL]))->text, "zero") == 0);
+    CHECK(cw_comp_has(w, 0, ids[SNAP_HP]) && *(int64_t *)cw_comp_ptr(w, 0, ids[SNAP_HP]) == 10);
+    CHECK(cw_comp_has(w, 0, ids[SNAP_TAG]) && !cw_comp_has(w, 0, ids[SNAP_NOTE]));
+    CHECK(cw_comp_has(w, 7, ids[SNAP_TAG]) && !cw_comp_has(w, 7, ids[SNAP_POS]) && !cw_comp_has(w, 7, ids[SNAP_NOTE]));
+    CHECK(cw_comp_has(w, 1000, ids[SNAP_LABEL]) && strcmp(((snap_label *)cw_comp_ptr(w, 1000, ids[SNAP_LABEL]))->text, "thousand") == 0);
+    CHECK(cw_comp_has(w, 1000, ids[SNAP_HP]) && *(int64_t *)cw_comp_ptr(w, 1000, ids[SNAP_HP]) == 20);
+    CHECK(!cw_comp_has(w, 1000, ids[SNAP_TAG]) && !cw_comp_has(w, 1000, ids[SNAP_POS]));
+    p = cw_comp_ptr(w, 70000, ids[SNAP_POS]);
+    CHECK(cw_comp_has(w, 70000, ids[SNAP_POS]) && p->x == 3.0f && p->y == 4.0f);
+    CHECK(cw_sig_empty(w->entities[70000].signature) == false && !cw_comp_has(w, 70000, ids[SNAP_HP]));
+    CHECK(cw_query_collect(w, no_mask(), NULL, 0) == 4 && cw_query_collect(w, value_mask(ids[SNAP_TAG]), NULL, 0) == 2);
+}
+static void test_world_deserialize(void) {
+    cw_world a, b, other;
+    cw_buffer image;
+    cw_snapshot_error error;
+    cw_serialize_config out = {0};
+    cw_deserialize_config in = cw_deserialize_defaults();
+    out.allow_raw = true;
+    out.user_version = 3;
+    in.allow_raw = true;
+    in.max_entity_id = 100000;
+    CHECK(in.max_entities == CW_SNAPSHOT_DEFAULT_MAX_ENTITIES && in.max_component_bytes == CW_SNAPSHOT_DEFAULT_MAX_COMPONENT_BYTES);
+    CHECK(!in.check_user_version && !in.user_version);
+
+    /* an empty world round-trips: tick kept, ids start at zero */
+    cw_world_init(&a, NULL);
+    snap_register(&a, snap_ids_a);
+    a.tick = 12;
+    CHECK(cw_world_serialize(&a, &out, &image, &error));
+    cw_world_init(&b, NULL);
+    snap_register(&b, snap_ids_b);
+    CHECK(cw_world_deserialize(&b, image.data, image.size, &in, &error) && error.status == CW_SNAPSHOT_OK);
+    CHECK(cw_world_entity_count(&b) == 0 && b.next_id == 0 && b.tick == 12 && cw_world_created(&b).count == 0);
+    CHECK(cw_world_create_entity(&b) == 0 && cw_world_create_entity(&b) == 1);
+    CHECK(!cw_world_deserialize(&b, image.data, image.size, &in, &error) && error.status == CW_SNAPSHOT_ERROR_WORLD_NOT_FRESH);
+    CHECK(cw_world_entity_count(&b) == 2);       /* a refused load touches nothing */
+    cw_buffer_free(&image);
+    cw_world_reset(&b);
+
+    /* sparse ids, tags, several components, registration in another order */
+    cw_world_reset(&a);
+    sparse_populate(&a, snap_ids_a);
+    CHECK(cw_world_serialize(&a, &out, &image, &error));
+    cw_cached_query *tagged = cw_query_create(&b, cw_filter_all(value_mask(snap_ids_b[SNAP_TAG])));
+    CHECK(cw_world_deserialize(&b, image.data, image.size, &in, &error) && error.status == CW_SNAPSHOT_OK);
+    sparse_expect(&b, snap_ids_b);
+    CHECK(cw_query_count(tagged) == 2 && cw_query_contains(tagged, 7) && cw_query_contains(tagged, 0));
+    cw_id_view created = cw_world_created(&b);
+    CHECK(created.count == 4 && created.data[0] == 0 && created.data[3] == 70000);
+    CHECK(b.capacity > 70000 && b.pools[snap_ids_b[SNAP_POS]].capacity > 70000);
+
+    /* new entities continue where the original world would */
+    cw_entity_id fresh = cw_world_create_entity(&b);
+    CHECK(fresh == 70001 && cw_world_create_entity(&a) == 70001);
+    CHECK(cw_comp_add(&b, fresh, snap_ids_b[SNAP_TAG]) && cw_query_count(tagged) == 3);
+    int64_t hp = 99;
+    CHECK(cw_comp_set(&b, 70000, snap_ids_b[SNAP_HP], &hp, sizeof(hp)));  /* loaded entities are ordinary */
+    CHECK(cw_comp_remove(&b, 0, snap_ids_b[SNAP_HP]) && !cw_comp_has(&b, 0, snap_ids_b[SNAP_HP]));
+    CHECK(cw_query_collect(&b, value_mask(snap_ids_b[SNAP_HP]), NULL, 0) == 2);
+    cw_world_mark_destroy(&b, 7);
+    cw_world_sweep(&b);
+    CHECK(cw_query_count(tagged) == 2 && cw_world_entity_count(&b) == 4);
+    CHECK(cw_world_create_entity(&b) == 70002 && cw_world_entity_count(&b) == 5);
+    CHECK(cw_world_restore_entity(&b, 7) && cw_world_create_entity(&b) == 70003);
+    cw_query_destroy(tagged);
+    cw_world_reset(&b);
+
+    /* unknown component names are rejected, with no opt-out */
+    cw_world_init(&other, NULL);
+    CHECK(cw_comp_register(&other, 1, sizeof(int64_t), 8, "Health", NULL));
+    CHECK(cw_comp_register(&other, 2, 0, 1, "Tag", NULL));
+    cw_codec pos = {marshal_pos, unmarshal_pos};
+    CHECK(cw_comp_register(&other, 3, sizeof(snap_pos), 4, "Position", NULL) && cw_comp_set_codec(&other, 3, pos));
+    CHECK(!cw_world_deserialize(&other, image.data, image.size, &in, &error));
+    CHECK(error.status == CW_SNAPSHOT_ERROR_UNKNOWN_COMPONENT && strcmp(error.name, "Label") == 0);
+    snap_expect_fresh(&other);
+    CHECK(cw_world_created(&other).count == 0 && other.tick == 0);
+    cw_world_destroy(&other);
+
+    /* versions: the format version always, the user version on request */
+    unsigned char *copy = malloc(image.size);
+    memcpy(copy, image.data, image.size);
+    copy[4] = 2;
+    CHECK(!cw_world_deserialize(&b, copy, image.size, &in, &error));
+    CHECK(error.status == CW_SNAPSHOT_ERROR_VERSION && error.offset == 4);
+    snap_expect_fresh(&b);
+    free(copy);
+    cw_deserialize_config versioned = in;
+    versioned.check_user_version = true;
+    versioned.user_version = 4;
+    CHECK(!cw_world_deserialize(&b, image.data, image.size, &versioned, &error));
+    CHECK(error.status == CW_SNAPSHOT_ERROR_VERSION && error.offset == 16);
+    snap_expect_fresh(&b);
+    versioned.user_version = 3;
+    CHECK(cw_world_deserialize(&b, image.data, image.size, &versioned, &error));
+    sparse_expect(&b, snap_ids_b);
+    cw_world_reset(&b);
+    CHECK(!cw_world_deserialize(&b, image.data, 10, &in, &error) && error.status == CW_SNAPSHOT_ERROR_TRUNCATED);
+    CHECK(!cw_world_deserialize(NULL, image.data, image.size, &in, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_world_deserialize(&b, NULL, 1, &in, &error) && error.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_world_deserialize(&b, image.data, image.size, NULL, &error) && error.status == CW_SNAPSHOT_ERROR_SCHEMA);
+    CHECK(strcmp(error.name, "Health") == 0);    /* defaults do not accept raw payloads */
+    snap_expect_fresh(&b);
+
+    /* a codec failure part-way through releases what was built */
+    cw_world_destroy(&b);
+    cw_world_init(&b, NULL);
+    snap_register_clear(&b, snap_ids_b, clear_value);
+    cw_observer *health = cw_observer_create(&b, snap_ids_b[SNAP_HP]);
+    clears = 0;
+    b.tick = 5;
+    unmarshal_reject_text = "thousand";            /* entities 0 and 7 load, 1000 fails */
+    CHECK(!cw_world_deserialize(&b, image.data, image.size, &in, &error));
+    CHECK(error.status == CW_SNAPSHOT_ERROR_UNMARSHAL && error.entity == 1000);
+    CHECK(error.component == snap_ids_b[SNAP_LABEL] && strcmp(error.name, "Label") == 0);
+    CHECK(clears == 1);                            /* entity 0's Health was released */
+    snap_expect_fresh(&b);
+    CHECK(b.tick == 5 && cw_world_created(&b).count == 0 && cw_query_collect(&b, no_mask(), NULL, 0) == 0);
+    cw_observer_observe(health);
+    CHECK(cw_observer_count(health, CW_CHANGE_ADDED) == 1 && cw_observer_count(health, CW_CHANGE_REMOVED) == 1);
+    unmarshal_reject_text = NULL;
+    CHECK(cw_world_deserialize(&b, image.data, image.size, &in, &error) && clears == 1);
+    sparse_expect(&b, snap_ids_b);
+    CHECK(cw_world_create_entity(&b) == 70001);
+    cw_observer_destroy(health);
+
+    /* the full snapshot path accepts a serialized image as well */
+    cw_world_reset(&b);
+    cw_snapshot_load_config load = snap_load_config();
+    CHECK(cw_snapshot_load(&b, image.data, image.size, &load, &error));
+    sparse_expect(&b, snap_ids_b);
+
+    cw_buffer_free(&image);
+    cw_world_destroy(&a);
+    cw_world_destroy(&b);
+}
+
+static bool file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+static void test_file_helpers(void) {
+    const char *path = "clockwork_test_snapshot.cwsn", *temp = "clockwork_test_snapshot.cwsn.tmp";
+    cw_file_error error;
+    cw_buffer read, again;
+    cw_world a, b;
+    remove(path);
+    remove(temp);
+
+    /* raw file round trip, limits and argument errors */
+    CHECK(cw_file_write(path, "hello", 5, &error) && error.status == CW_FILE_OK && !file_exists(temp));
+    CHECK(cw_file_read(path, 0, &read, &error) && read.size == 5 && memcmp(read.data, "hello", 5) == 0);
+    cw_buffer_free(&read);
+    CHECK(cw_file_read(path, 5, &read, &error) && read.size == 5);
+    cw_buffer_free(&read);
+    CHECK(!cw_file_read(path, 4, &read, &error) && error.status == CW_FILE_ERROR_TOO_LARGE);
+    CHECK(read.data == NULL && read.size == 0 && error.errnum == 0);
+    CHECK(cw_file_write(path, NULL, 0, &error) && cw_file_read(path, 0, &read, &error) && read.size == 0);
+    cw_buffer_free(&read);
+    CHECK(!cw_file_read("clockwork_no_such_file.cwsn", 0, &read, &error));
+    CHECK(error.status == CW_FILE_ERROR_OPEN && error.errnum != 0);
+    CHECK(!cw_file_write("clockwork_no_such_dir/x.cwsn", "a", 1, &error) && error.status == CW_FILE_ERROR_OPEN && error.errnum != 0);
+    CHECK(!cw_file_write(NULL, "a", 1, &error) && error.status == CW_FILE_ERROR_ARGUMENT);
+    CHECK(!cw_file_write("", "a", 1, &error) && error.status == CW_FILE_ERROR_ARGUMENT);
+    CHECK(!cw_file_write(path, NULL, 1, &error) && error.status == CW_FILE_ERROR_ARGUMENT);
+    CHECK(!cw_file_read(path, 0, NULL, &error) && error.status == CW_FILE_ERROR_ARGUMENT);
+    CHECK(!cw_file_read(NULL, 0, &read, NULL) && !cw_file_write(NULL, NULL, 0, NULL));
+#ifndef _WIN32
+    /* replacing fails when the target is a directory; the temp is cleaned up */
+    CHECK(!cw_file_write(".", "a", 1, &error) && error.status == CW_FILE_ERROR_REPLACE && error.errnum != 0);
+    CHECK(!file_exists("..tmp"));
+#endif
+    for (int status = CW_FILE_OK; status <= CW_FILE_ERROR_SNAPSHOT; ++status)
+        CHECK(strcmp(cw_file_status_string((cw_file_status)status), "unknown status") != 0);
+    CHECK(strcmp(cw_file_status_string((cw_file_status)99), "unknown status") == 0);
+    /* a large file crosses the read chunk boundary */
+    size_t big = 200 * 1024 + 13;
+    unsigned char *bytes = malloc(big);
+    for (size_t i = 0; i < big; ++i) bytes[i] = (unsigned char)(i * 7);
+    CHECK(cw_file_write(path, bytes, big, &error) && cw_file_read(path, 0, &read, &error));
+    CHECK(read.size == big && memcmp(read.data, bytes, big) == 0);
+    cw_buffer_free(&read);
+    CHECK(!cw_file_read(path, big - 1, &read, &error) && error.status == CW_FILE_ERROR_TOO_LARGE);
+    free(bytes);
+
+    /* snapshot files */
+    cw_world_init(&a, NULL);
+    snap_register(&a, snap_ids_a);
+    snap_populate(&a, snap_ids_a);
+    cw_snapshot_save_config save = snap_save_config(false);
+    cw_snapshot_load_config load = snap_load_config();
+    CHECK(cw_snapshot_save_file(&a, path, &save, &error) && error.status == CW_FILE_OK && !file_exists(temp));
+    cw_world_init(&b, NULL);
+    snap_register(&b, snap_ids_b);
+    CHECK(cw_snapshot_load_file(&b, path, &load, &error) && error.status == CW_FILE_OK);
+    snap_expect_populated(&b, snap_ids_b, false);
+    CHECK(!cw_snapshot_load_file(&b, path, &load, &error));
+    CHECK(error.status == CW_FILE_ERROR_SNAPSHOT && error.snapshot.status == CW_SNAPSHOT_ERROR_WORLD_NOT_FRESH);
+    cw_world_reset(&b);
+    CHECK(!cw_snapshot_load_file(&b, "clockwork_no_such_file.cwsn", &load, &error) && error.status == CW_FILE_ERROR_OPEN);
+    CHECK(!cw_snapshot_save_file(NULL, path, &save, &error) && error.status == CW_FILE_ERROR_ARGUMENT);
+    CHECK(!cw_snapshot_load_file(NULL, path, &load, &error) && error.status == CW_FILE_ERROR_ARGUMENT);
+
+    /* a failed save leaves the valid file byte for byte, and no temp file */
+    CHECK(cw_file_read(path, 0, &read, &error));
+    cw_snapshot_save_config strict = {0};
+    CHECK(!cw_snapshot_save_file(&a, path, &strict, &error));
+    CHECK(error.status == CW_FILE_ERROR_SNAPSHOT && error.snapshot.status == CW_SNAPSHOT_ERROR_NO_CODEC);
+    CHECK(strcmp(error.snapshot.name, "Health") == 0 && error.errnum == 0 && !file_exists(temp));
+    CHECK(!cw_snapshot_save_file(&a, "clockwork_no_such_dir/x.cwsn", &save, &error) && error.status == CW_FILE_ERROR_OPEN);
+    CHECK(cw_file_read(path, 0, &again, &error) && again.size == read.size && memcmp(again.data, read.data, read.size) == 0);
+    cw_buffer_free(&again);
+    CHECK(cw_snapshot_load_file(&b, path, &load, &error));   /* still loads */
+    cw_world_reset(&b);
+
+    /* a corrupt file is reported with the snapshot details, world still fresh */
+    read.data[4] = 9;
+    CHECK(cw_file_write(path, read.data, read.size, &error));
+    CHECK(!cw_snapshot_load_file(&b, path, &load, &error));
+    CHECK(error.status == CW_FILE_ERROR_SNAPSHOT && error.snapshot.status == CW_SNAPSHOT_ERROR_VERSION && error.snapshot.offset == 4);
+    snap_expect_fresh(&b);
+    cw_buffer_free(&read);
+
+    /* serialized files */
+    cw_serialize_config out = {0};
+    out.allow_raw = true;
+    out.user_version = 2;
+    cw_deserialize_config in = cw_deserialize_defaults();
+    in.allow_raw = true;
+    in.max_entity_id = 100000;
+    in.check_user_version = true;
+    in.user_version = 2;
+    cw_world_reset(&a);
+    sparse_populate(&a, snap_ids_a);
+    CHECK(cw_world_serialize_file(&a, path, &out, &error) && error.status == CW_FILE_OK);
+    CHECK(cw_world_deserialize_file(&b, path, &in, &error) && error.status == CW_FILE_OK);
+    sparse_expect(&b, snap_ids_b);
+    cw_world_reset(&b);
+    in.user_version = 3;
+    CHECK(!cw_world_deserialize_file(&b, path, &in, &error));
+    CHECK(error.status == CW_FILE_ERROR_SNAPSHOT && error.snapshot.status == CW_SNAPSHOT_ERROR_VERSION);
+    snap_expect_fresh(&b);
+    CHECK(!cw_world_deserialize_file(NULL, path, &in, &error) && error.status == CW_FILE_ERROR_ARGUMENT);
+    CHECK(!cw_world_serialize_file(NULL, path, &out, &error) && error.status == CW_FILE_ERROR_SNAPSHOT);
+    CHECK(error.snapshot.status == CW_SNAPSHOT_ERROR_ARGUMENT);
+    CHECK(!cw_world_deserialize_file(&b, path, &in, NULL) && !cw_world_serialize_file(NULL, path, &out, NULL));
+
+    CHECK(remove(path) == 0 && !file_exists(temp));
+    cw_world_destroy(&a);
+    cw_world_destroy(&b);
+}
+
 typedef struct { int events[128]; size_t count; cw_sim *sim; cw_entity_id victim; } trace;
 static void record(cw_world *w, int event) {
     trace *t = w->user;
@@ -1445,6 +2599,13 @@ int main(void) {
     RUN(test_memory_stats);
     RUN(test_alignment_and_tags);
     RUN(test_codecs);
+    RUN(test_byte_writer);
+    RUN(test_byte_reader);
+    RUN(test_snapshot_roundtrip);
+    RUN(test_snapshot_validation);
+    RUN(test_world_serialize);
+    RUN(test_world_deserialize);
+    RUN(test_file_helpers);
     RUN(test_scheduler);
     RUN(test_tick_lifecycle);
     RUN(test_scheduler_mutation_guard);

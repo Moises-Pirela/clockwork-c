@@ -1,11 +1,12 @@
 param(
     [ValidateSet('msvc', 'clang')][string]$Compiler = 'msvc',
     [switch]$Release,
-    [switch]$Sanitize
+    [switch]$Sanitize,
+    [switch]$NoGui
 )
 $ErrorActionPreference = 'Stop'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-if (!(Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio C++ Build Tools are required. Alternatively, use CMake or compile the three C sources directly.' }
+if (!(Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio C++ Build Tools are required. Alternatively, use CMake or compile the C sources in src directly.' }
 $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (!$installation) { throw 'No Visual Studio C++ toolchain was found.' }
 if ($Sanitize -and $Compiler -eq 'msvc') {
@@ -40,9 +41,9 @@ $commands = @(
     'set "TMP=%CD%"',
     ('call "' + $devcmd + '" -arch=x64 -host_arch=x64 >nul'),
     'if errorlevel 1 exit /b 1',
-    ($cc + ' ' + $flags + ' /c "' + (Join-Path $PSScriptRoot 'src/clockwork.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_sim.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_commands.c') + '"'),
+    ($cc + ' ' + $flags + ' /c "' + (Join-Path $PSScriptRoot 'src/clockwork.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_sim.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_commands.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_bytes.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_snapshot.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_file.c') + '"'),
     'if errorlevel 1 exit /b 1',
-    'lib /nologo /out:clockwork.lib clockwork.obj cw_sim.obj cw_commands.obj',
+    'lib /nologo /out:clockwork.lib clockwork.obj cw_sim.obj cw_commands.obj cw_bytes.obj cw_snapshot.obj cw_file.obj',
     'if errorlevel 1 exit /b 1',
     ($cc + ' ' + $flags + ' "' + (Join-Path $PSScriptRoot 'tests/test_clockwork.c') + '" /Fo:test_clockwork.obj /Fe:clockwork_tests.exe /link clockwork.lib /INCREMENTAL:NO'),
     'if errorlevel 1 exit /b 1',
@@ -51,8 +52,28 @@ $commands = @(
     ($cc + ' ' + $flags + ' "' + (Join-Path $PSScriptRoot 'examples/movement.c') + '" /Fo:movement.obj /Fe:clockwork_movement.exe /link clockwork.lib /INCREMENTAL:NO'),
     'if errorlevel 1 exit /b 1',
     'clockwork_movement.exe',
+    'if errorlevel 1 exit /b 1',
     'exit /b %errorlevel%'
 )
+if (!$NoGui) {
+    # The save/load tool: vendored raylib (2D desktop subset) + raygui, Win32 backend.
+    $raylib = Join-Path $PSScriptRoot 'third_party/raylib/src'
+    $rlflags = '/nologo /TC /w /DPLATFORM_DESKTOP /DGRAPHICS_API_OPENGL_33 /I"' + $raylib + '" /I"' + (Join-Path $raylib 'external/glfw/include') + '"'
+    $rlflags += if ($Release) { ' /O2' } else { ' /O1' }
+    $rlunits = @('rcore', 'rshapes', 'rtextures', 'rtext', 'utils', 'rglfw', 'raygui_impl')
+    $rlsources = ($rlunits | ForEach-Object { '"' + (Join-Path $raylib ($_ + '.c')) + '"' }) -join ' '
+    $rlobjects = ($rlunits | ForEach-Object { $_ + '.obj' }) -join ' '
+    $commands = $commands[0..($commands.Length - 2)] + @(
+        ($cc + ' ' + $rlflags + ' /c ' + $rlsources),
+        'if errorlevel 1 exit /b 1',
+        ('lib /nologo /out:clockwork_raylib.lib ' + $rlobjects),
+        'if errorlevel 1 exit /b 1',
+        ($cc + ' ' + $flags + ' /I"' + $raylib + '" "' + (Join-Path $PSScriptRoot 'examples/save_load.c') + '" /Fo:save_load.obj /Fe:clockwork_save_load.exe /link clockwork.lib clockwork_raylib.lib winmm.lib gdi32.lib user32.lib shell32.lib opengl32.lib /INCREMENTAL:NO'),
+        'if errorlevel 1 exit /b 1',
+        'clockwork_save_load.exe --headless',
+        'exit /b %errorlevel%'
+    )
+}
 $batch = Join-Path $out 'compile.cmd'
 Set-Content -LiteralPath $batch -Value $commands -Encoding ascii
 Push-Location $out

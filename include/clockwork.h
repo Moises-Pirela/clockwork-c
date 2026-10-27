@@ -434,6 +434,321 @@ cw_flush_result cw_commands_last_flush(const cw_commands *commands);
 cw_id_view cw_commands_created(const cw_commands *commands);
 cw_commands *cw_world_commands(cw_world *w);
 
+/* ---------------------------------------------------------------------------
+ * Byte buffers
+ *
+ * Bounds-checked primitives for binary encoding. Every multi-byte integer is
+ * written and read little-endian regardless of the host; floats are their
+ * IEEE-754 bit patterns. Signed integers are two's complement.
+ *
+ * A cw_writer is a value owned by whoever declares it and comes in three
+ * flavours:
+ *   - growable (cw_writer_init): a heap buffer managed by the writer that
+ *     grows geometrically; cw_writer_destroy frees it, or
+ *     cw_writer_release hands it to the caller, who frees it with free().
+ *     Writes never fail (allocation failure aborts, as everywhere else).
+ *   - fixed (cw_writer_init_fixed with storage): writes that do not fit set
+ *     the sticky `overflow` flag and return false, but `size` keeps counting
+ *     the bytes the content needs, so a too-small buffer still reports the
+ *     required size. Nothing is written past the capacity.
+ *   - measuring (cw_writer_init_fixed with NULL): stores nothing, only
+ *     counts; writes return true.
+ * This mirrors the codec marshal contract, so a codec can implement marshal
+ * as cw_writer_init_fixed(&wr, data, capacity) ... *size = wr.size;
+ * return !wr.overflow.
+ *
+ * A cw_reader borrows a byte range; reads past the end fail, set the sticky
+ * `error` flag, store 0 in the output and leave the position unchanged, so a
+ * sequence of reads can be checked once with cw_reader_ok. cw_reader_sub
+ * carves a length-delimited span into its own bounded reader.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    unsigned char *data;
+    size_t size, capacity;       /* size: bytes written, or required when overflowed/measuring */
+    bool owned;                  /* growable heap buffer managed by the writer */
+    bool overflow;               /* sticky: a write did not fit a fixed buffer */
+} cw_writer;
+void cw_writer_init(cw_writer *w);                                   /* growable */
+void cw_writer_init_fixed(cw_writer *w, void *data, size_t capacity); /* NULL measures */
+void cw_writer_destroy(cw_writer *w);
+void cw_writer_clear(cw_writer *w);                /* size = 0, overflow cleared; keeps storage */
+void cw_writer_reserve(cw_writer *w, size_t capacity);               /* growable only */
+unsigned char *cw_writer_release(cw_writer *w, size_t *size);        /* growable only */
+size_t cw_writer_size(const cw_writer *w);
+bool cw_writer_ok(const cw_writer *w);                               /* !overflow */
+/* Reserves `size` bytes at the end and returns them for the caller to fill;
+ * NULL when measuring or when they do not fit (the size still advances). */
+void *cw_writer_claim(cw_writer *w, size_t size);
+bool cw_writer_bytes(cw_writer *w, const void *data, size_t size);
+bool cw_writer_u8(cw_writer *w, uint8_t value);
+bool cw_writer_u16(cw_writer *w, uint16_t value);
+bool cw_writer_u32(cw_writer *w, uint32_t value);
+bool cw_writer_u64(cw_writer *w, uint64_t value);
+bool cw_writer_i8(cw_writer *w, int8_t value);
+bool cw_writer_i16(cw_writer *w, int16_t value);
+bool cw_writer_i32(cw_writer *w, int32_t value);
+bool cw_writer_i64(cw_writer *w, int64_t value);
+bool cw_writer_f32(cw_writer *w, float value);
+bool cw_writer_f64(cw_writer *w, double value);
+/* Overwrite a previously written field, e.g. a length learned later. */
+bool cw_writer_patch_u32(cw_writer *w, size_t offset, uint32_t value);
+bool cw_writer_patch_u64(cw_writer *w, size_t offset, uint64_t value);
+
+typedef struct {
+    const unsigned char *data;
+    size_t size, offset;
+    bool error;                  /* sticky: a read ran past the end */
+} cw_reader;
+cw_reader cw_reader_make(const void *data, size_t size);
+size_t cw_reader_remaining(const cw_reader *r);
+bool cw_reader_ok(const cw_reader *r);
+bool cw_reader_at_end(const cw_reader *r);                           /* ok and fully consumed */
+bool cw_reader_skip(cw_reader *r, size_t size);
+bool cw_reader_bytes(cw_reader *r, void *out, size_t size);
+/* Borrow `size` bytes in place; NULL when they are not available. */
+const void *cw_reader_view(cw_reader *r, size_t size);
+bool cw_reader_sub(cw_reader *r, size_t size, cw_reader *sub);
+bool cw_reader_u8(cw_reader *r, uint8_t *out);
+bool cw_reader_u16(cw_reader *r, uint16_t *out);
+bool cw_reader_u32(cw_reader *r, uint32_t *out);
+bool cw_reader_u64(cw_reader *r, uint64_t *out);
+bool cw_reader_i8(cw_reader *r, int8_t *out);
+bool cw_reader_i16(cw_reader *r, int16_t *out);
+bool cw_reader_i32(cw_reader *r, int32_t *out);
+bool cw_reader_i64(cw_reader *r, int64_t *out);
+bool cw_reader_f32(cw_reader *r, float *out);
+bool cw_reader_f64(cw_reader *r, double *out);
+
+/* ---------------------------------------------------------------------------
+ * Snapshots
+ *
+ * cw_snapshot_save serialises a world's entities into a versioned binary
+ * image appended to a cw_writer; cw_snapshot_load rebuilds that image in a
+ * fresh world whose component schema the caller has registered beforehand.
+ *
+ * What is captured: every active entity (including those marked for
+ * destruction, which are re-marked on load), the components it carries, the
+ * tick, the id allocator (next_id, recycle_ids, the recycled id list in
+ * order) and last_created. Entity ids are preserved exactly, and after a
+ * load the world hands out the same ids the saved world would have. Not
+ * captured: the registry itself, cached queries, observers, command buffers,
+ * the created list and the user pointer; loaded entities are reported in
+ * cw_world_created like any restored entity so EntityCreated systems can
+ * rebuild transient state.
+ *
+ * Schema: components are matched by registered name, never by id, so the
+ * loading world may register them in any order. Each present component is
+ * encoded by its marshal callback, or, when it has none and the save
+ * config allows it, as the raw bytes of its slot (host layout; the loader
+ * requires an identical element size and host byte order). Transient
+ * components are skipped unless include_transient is set. Only components
+ * some entity actually carries appear in the image.
+ *
+ * Ownership and failure: the caller owns the writer, the input bytes, the
+ * world and the configs; nothing is retained. A failed save truncates the
+ * writer back to its initial size; with a fixed writer that is too small the
+ * error reports the bytes required. A load validates the whole image against
+ * the limits and the registered schema before touching the world, so most
+ * failures leave it untouched; if a codec then rejects a payload the world
+ * is reset, so it is fresh again either way. The world must be fresh to
+ * begin with: no entities, next_id zero, no recycled ids (a new or reset
+ * world).
+ *
+ * Limits: every count and length in the image is checked against the load
+ * config before any memory is committed, which makes untrusted input safe
+ * to pass; zero fields take the defaults below, SIZE_MAX / INT64_MAX mean
+ * unlimited. Trailing bytes after the image are an error; cw_snapshot_peek
+ * reports the image size for callers embedding snapshots in larger streams.
+ *
+ * Format (CW_SNAPSHOT_FORMAT_VERSION, all integers little-endian):
+ *   header   magic "CWSN", u16 version, u16 flags (bit 0: raw payloads
+ *            were written on a big-endian host), u64 total size including
+ *            the header, u32 user version, u32 section count
+ *   section  u32 tag, u64 payload length, payload; unknown tags are skipped
+ *     "WRLD" u64 tick, i64 next_id, i64 last_created, u8 recycle_ids
+ *     "SCHM" u16 count, then per component: u8 saved id, u8 encoding
+ *            (1 codec, 2 raw), u64 element size, u16 name length, name
+ *     "ENTS" u64 count, then per entity in ascending id order: i64 id,
+ *            u8 flags (bit 2: marked for destruction), u8 component count,
+ *            then per component: u8 saved id, u32 length, payload
+ *     "RCYL" u64 count, i64 ids in list order
+ * ------------------------------------------------------------------------- */
+#define CW_SNAPSHOT_FORMAT_VERSION 1
+#define CW_SNAPSHOT_DEFAULT_MAX_ENTITIES ((size_t)1 << 20)
+#define CW_SNAPSHOT_DEFAULT_MAX_ENTITY_ID (INT64_C(1) << 20)
+#define CW_SNAPSHOT_DEFAULT_MAX_COMPONENT_BYTES ((size_t)1 << 20)
+#define CW_SNAPSHOT_NAME_CAPACITY 64
+
+typedef enum {
+    CW_SNAPSHOT_OK,
+    CW_SNAPSHOT_ERROR_ARGUMENT,          /* NULL world, writer or data */
+    CW_SNAPSHOT_ERROR_NO_CODEC,          /* save: component has no marshal and raw is disabled */
+    CW_SNAPSHOT_ERROR_MARSHAL,           /* save: a marshal callback failed */
+    CW_SNAPSHOT_ERROR_OVERFLOW,          /* save: fixed writer too small; offset = bytes required */
+    CW_SNAPSHOT_ERROR_TRUNCATED,         /* load: the image ends early */
+    CW_SNAPSHOT_ERROR_TRAILING_DATA,     /* load: bytes follow the image */
+    CW_SNAPSHOT_ERROR_MAGIC,             /* load: not a snapshot */
+    CW_SNAPSHOT_ERROR_VERSION,           /* load: unsupported format version or flags */
+    CW_SNAPSHOT_ERROR_CORRUPT,           /* load: structurally inconsistent */
+    CW_SNAPSHOT_ERROR_LIMIT,             /* load: a configured limit was exceeded */
+    CW_SNAPSHOT_ERROR_WORLD_NOT_FRESH,   /* load: the world already holds state */
+    CW_SNAPSHOT_ERROR_UNKNOWN_COMPONENT, /* load: name not registered in the world */
+    CW_SNAPSHOT_ERROR_SCHEMA,            /* load: registration incompatible with the image */
+    CW_SNAPSHOT_ERROR_UNMARSHAL          /* load: an unmarshal callback rejected its payload */
+} cw_snapshot_status;
+typedef struct {
+    cw_snapshot_status status;
+    size_t offset;                       /* byte offset in the image where the problem was found */
+    cw_entity_id entity;                 /* entity involved, or CW_INVALID_ENTITY */
+    cw_component_id component;           /* world component involved, or CW_INVALID_COMPONENT */
+    char name[CW_SNAPSHOT_NAME_CAPACITY]; /* component name involved (truncated), or "" */
+} cw_snapshot_error;
+const char *cw_snapshot_status_string(cw_snapshot_status status);
+
+typedef struct {
+    bool include_transient;              /* also save transient components */
+    bool allow_raw;                      /* copy slot bytes when a component has no marshal */
+    uint32_t user_version;               /* application schema version stored in the header */
+} cw_snapshot_save_config;
+typedef struct {
+    size_t max_entities;                 /* entity records and recycled ids, each */
+    cw_entity_id max_entity_id;          /* highest id accepted (bounds the world capacity) */
+    size_t max_component_bytes;          /* per component payload */
+    bool allow_raw;                      /* accept raw-encoded components */
+    bool ignore_unknown_components;      /* skip components the world has not registered */
+} cw_snapshot_load_config;
+cw_snapshot_load_config cw_snapshot_load_defaults(void);
+
+typedef struct {
+    uint16_t format_version, flags;
+    uint32_t user_version;
+    uint64_t size;                       /* bytes of the whole image */
+    uint64_t tick;
+    cw_entity_id next_id;
+    uint64_t entity_count, recycled_count;
+    uint16_t component_count;            /* schema entries */
+} cw_snapshot_info;
+
+/* A NULL config selects the defaults. */
+bool cw_snapshot_save(cw_world *w, const cw_snapshot_save_config *config,
+                      cw_writer *out, cw_snapshot_error *error);
+bool cw_snapshot_load(cw_world *w, const void *data, size_t size,
+                      const cw_snapshot_load_config *config, cw_snapshot_error *error);
+/* Validates the header and section structure only; no schema is needed. */
+bool cw_snapshot_peek(const void *data, size_t size, cw_snapshot_info *info,
+                      cw_snapshot_error *error);
+
+/* ---------------------------------------------------------------------------
+ * World serialization
+ *
+ * cw_world_serialize writes the observable state of a world into a freshly
+ * allocated buffer in the snapshot format above: the visible entities
+ * (active and not marked for destruction) with their ids preserved, their
+ * non-transient components identified by registered name, the tick and the
+ * next entity id. Entities pending destruction, transient components, the
+ * recycled id list and last_created are left out (the image carries an
+ * empty recycled list and last_created = CW_INVALID_ENTITY); next_id still
+ * guarantees that the omitted ids are never handed out again after a load.
+ * Encoding follows the snapshot rules: marshal callback, or raw slot bytes
+ * with allow_raw, else CW_SNAPSHOT_ERROR_NO_CODEC.
+ *
+ * Ownership: on success the caller owns the buffer and releases it with
+ * cw_buffer_free (the world and config are not retained); on failure the
+ * buffer is empty and nothing is allocated. cw_snapshot_load and
+ * cw_snapshot_peek accept the result. A NULL config selects the defaults.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    unsigned char *data;
+    size_t size;
+} cw_buffer;
+void cw_buffer_free(cw_buffer *buffer);
+typedef struct {
+    bool allow_raw;                      /* copy slot bytes when a component has no marshal */
+    uint32_t user_version;               /* application schema version stored in the header */
+} cw_serialize_config;
+bool cw_world_serialize(cw_world *w, const cw_serialize_config *config,
+                        cw_buffer *out, cw_snapshot_error *error);
+
+/* cw_world_deserialize rebuilds a serialized image in a fresh world (new or
+ * reset: no entities, next_id zero, no recycled ids) whose component schema
+ * the caller has registered, in any order and at any ids: component types
+ * are resolved by registered name. Entity ids, components, the tick and
+ * next_id are restored exactly, so entities created afterwards receive the
+ * ids the original world would have handed out next.
+ *
+ * It is strict where cw_snapshot_load is configurable: a component name the
+ * world has not registered fails with CW_SNAPSHOT_ERROR_UNKNOWN_COMPONENT,
+ * an unsupported format version (or, with check_user_version, a different
+ * user version) fails with CW_SNAPSHOT_ERROR_VERSION. The limits work as in
+ * cw_snapshot_load_config (zero selects the defaults).
+ *
+ * Failure never leaves a half-built world: structure, limits and schema are
+ * validated before anything is created, and if a codec rejects a payload
+ * afterwards the entities built so far are released through the normal
+ * reset path (cleanup callbacks run) and the world is fresh again, with its
+ * prior settings, so the caller may retry or load something else. The
+ * return value is false in every such case. Loaded entities are reported
+ * in cw_world_created, like restored entities. */
+typedef struct {
+    size_t max_entities;
+    cw_entity_id max_entity_id;
+    size_t max_component_bytes;
+    bool allow_raw;                      /* accept raw-encoded components */
+    bool check_user_version;             /* require the image's user version to match */
+    uint32_t user_version;
+} cw_deserialize_config;
+cw_deserialize_config cw_deserialize_defaults(void);
+bool cw_world_deserialize(cw_world *w, const void *data, size_t size,
+                          const cw_deserialize_config *config, cw_snapshot_error *error);
+
+/* ---------------------------------------------------------------------------
+ * Files
+ *
+ * Convenience wrappers that pair the memory APIs above with whole-file I/O.
+ * Saving encodes the complete image in memory first and only then writes it
+ * to a sibling temporary file (`path` + ".tmp"), flushes it to disk and
+ * renames it over `path`; an encoding or I/O failure therefore never
+ * damages a valid file already at `path`, and a crash mid-write leaves at
+ * most the temporary behind. Loading reads the whole file into memory
+ * (bounded by `max_size`, default CW_FILE_DEFAULT_MAX_SIZE, to keep a wrong
+ * path from exhausting memory) and then loads it with the same guarantees
+ * as the memory APIs: the world is untouched or reset to fresh on failure.
+ *
+ * Ownership: paths, worlds and configs are borrowed for the call; the
+ * buffer cw_file_read fills is the caller's and is released with
+ * cw_buffer_free. Errors report a file status, the errno captured at the
+ * failing call (0 when not applicable), and, for CW_FILE_ERROR_SNAPSHOT,
+ * the full cw_snapshot_error from the memory API.
+ * ------------------------------------------------------------------------- */
+#define CW_FILE_DEFAULT_MAX_SIZE ((size_t)256 << 20)
+typedef enum {
+    CW_FILE_OK,
+    CW_FILE_ERROR_ARGUMENT,              /* NULL or empty path, NULL world or buffer */
+    CW_FILE_ERROR_OPEN,                  /* fopen failed (errnum set) */
+    CW_FILE_ERROR_READ,                  /* read error (errnum set) */
+    CW_FILE_ERROR_WRITE,                 /* write, flush or close of the temporary failed (errnum set) */
+    CW_FILE_ERROR_TOO_LARGE,             /* the file exceeds max_size */
+    CW_FILE_ERROR_REPLACE,               /* renaming the temporary over `path` failed (errnum set) */
+    CW_FILE_ERROR_SNAPSHOT               /* the memory API failed; see `snapshot` */
+} cw_file_status;
+typedef struct {
+    cw_file_status status;
+    int errnum;
+    cw_snapshot_error snapshot;
+} cw_file_error;
+const char *cw_file_status_string(cw_file_status status);
+
+bool cw_file_write(const char *path, const void *data, size_t size, cw_file_error *error);
+bool cw_file_read(const char *path, size_t max_size, cw_buffer *out, cw_file_error *error);
+bool cw_snapshot_save_file(cw_world *w, const char *path, const cw_snapshot_save_config *config,
+                           cw_file_error *error);
+bool cw_snapshot_load_file(cw_world *w, const char *path, const cw_snapshot_load_config *config,
+                           cw_file_error *error);
+bool cw_world_serialize_file(cw_world *w, const char *path, const cw_serialize_config *config,
+                             cw_file_error *error);
+bool cw_world_deserialize_file(cw_world *w, const char *path, const cw_deserialize_config *config,
+                               cw_file_error *error);
+
 typedef enum {
     CW_INIT, CW_START, CW_STOP, CW_SHUTDOWN,
     CW_EARLY_UPDATE, CW_PHYSICS_UPDATE, CW_UPDATE, CW_LATE_UPDATE,
