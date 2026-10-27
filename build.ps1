@@ -56,19 +56,15 @@ $commands = @(
     'exit /b %errorlevel%'
 )
 if (!$NoGui) {
-    # The save/load tool: vendored raylib (2D desktop subset) + raygui, Win32 backend.
-    $raylib = Join-Path $PSScriptRoot 'third_party/raylib/src'
-    $rlflags = '/nologo /TC /w /DPLATFORM_DESKTOP /DGRAPHICS_API_OPENGL_33 /I"' + $raylib + '" /I"' + (Join-Path $raylib 'external/glfw/include') + '"'
-    $rlflags += if ($Release) { ' /O2' } else { ' /O1' }
-    $rlunits = @('rcore', 'rshapes', 'rtextures', 'rtext', 'utils', 'rglfw', 'raygui_impl')
-    $rlsources = ($rlunits | ForEach-Object { '"' + (Join-Path $raylib ($_ + '.c')) + '"' }) -join ' '
-    $rlobjects = ($rlunits | ForEach-Object { $_ + '.obj' }) -join ' '
+    $sokol = & (Join-Path $PSScriptRoot 'tools/prepare-sokol.ps1')
+    $sokolFlags = '/nologo /std:c11 /TC /w /DSOKOL_D3D11 /I"' + $sokol + '"'
+    $sokolFlags += if ($Release) { ' /O2' } else { ' /O1' }
     $commands = $commands[0..($commands.Length - 2)] + @(
-        ($cc + ' ' + $rlflags + ' /c ' + $rlsources),
+        ($cc + ' ' + $sokolFlags + ' /c "' + (Join-Path $PSScriptRoot 'examples/sokol_impl.c') + '" /Fo:sokol_impl.obj'),
         'if errorlevel 1 exit /b 1',
-        ('lib /nologo /out:clockwork_raylib.lib ' + $rlobjects),
+        'lib /nologo /out:clockwork_sokol.lib sokol_impl.obj',
         'if errorlevel 1 exit /b 1',
-        ($cc + ' ' + $flags + ' /I"' + $raylib + '" "' + (Join-Path $PSScriptRoot 'examples/save_load.c') + '" /Fo:save_load.obj /Fe:clockwork_save_load.exe /link clockwork.lib clockwork_raylib.lib winmm.lib gdi32.lib user32.lib shell32.lib opengl32.lib /INCREMENTAL:NO'),
+        ($cc + ' ' + $flags + ' /DSOKOL_D3D11 /I"' + $sokol + '" "' + (Join-Path $PSScriptRoot 'examples/save_load.c') + '" /Fo:save_load.obj /Fe:clockwork_save_load.exe /link clockwork.lib clockwork_sokol.lib d3d11.lib dxgi.lib user32.lib gdi32.lib shell32.lib ole32.lib /INCREMENTAL:NO'),
         'if errorlevel 1 exit /b 1',
         'clockwork_save_load.exe --headless',
         'exit /b %errorlevel%'

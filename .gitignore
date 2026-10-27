@@ -3,3 +3,5 @@
 *.o
 *.pdb
 *.ilk
+/third_party/
+/_deps/

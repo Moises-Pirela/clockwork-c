@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# Linux counterpart of build.ps1: compiles the library directly (no CMake),
-# archives it, then builds and runs the tests, the movement and save/load
-# examples and the visualizer in headless verification mode.
-#
-#   ./build.sh [--compiler gcc|clang] [--release] [--sanitize] [--no-gui]
-#
-# --no-gui skips the interactive save/load tool, which builds the vendored
-# raylib and needs the X11 development headers (libx11-dev libxrandr-dev
-# libxcursor-dev libxinerama-dev libxi-dev libxext-dev). CW_EXTRA_CFLAGS adds
-# flags to every compile (e.g. -I for headers in an unusual place).
-# Output goes to build/<compiler>-<debug|release>[-asan]/.
 set -euo pipefail
 
 compiler=gcc
@@ -26,7 +15,7 @@ while [ $# -gt 0 ]; do
         --sanitize) sanitize=1 ;;
         --no-gui) gui=0 ;;
         -h|--help)
-            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            printf 'Usage: %s [--compiler gcc|clang] [--release] [--sanitize] [--no-gui]\n' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -48,7 +37,6 @@ out=$root/build/$compiler-$configuration$suffix
 mkdir -p "$out"
 
 cflags=(-std=c11 -Wall -Wextra -Wpedantic -Werror -I"$root/include")
-# shellcheck disable=SC2206
 [ -n "${CW_EXTRA_CFLAGS:-}" ] && cflags+=($CW_EXTRA_CFLAGS)
 if [ "$release" = 1 ]; then cflags+=(-O2 -DNDEBUG); else cflags+=(-O0 -g); fi
 ldflags=(-lm)
@@ -76,21 +64,25 @@ run ./clockwork_movement | tee movement.log
 grep -q 'After 30 ticks: (3.00, 1.00)' movement.log || { echo "movement example produced unexpected output" >&2; exit 1; }
 
 if [ "$gui" = 1 ]; then
-    # The save/load tool: vendored raylib (2D desktop subset) + raygui, X11 backend.
-    raylib=$root/third_party/raylib/src
-    rlflags=(-std=gnu99 -w -DPLATFORM_DESKTOP -DGRAPHICS_API_OPENGL_33 -D_GLFW_X11
-             -I"$raylib" -I"$raylib/external/glfw/include")
-    [ "$release" = 1 ] && rlflags+=(-O2) || rlflags+=(-O1)
-    [ -n "${CW_EXTRA_CFLAGS:-}" ] && rlflags+=($CW_EXTRA_CFLAGS)
-    rlobjs=()
-    for unit in rcore rshapes rtextures rtext utils rglfw raygui_impl; do
-        run "$compiler" "${rlflags[@]}" -c "$raylib/$unit.c" -o "raylib_$unit.o"
-        rlobjs+=("raylib_$unit.o")
-    done
-    rm -f libclockwork_raylib.a
-    run ar rcs libclockwork_raylib.a "${rlobjs[@]}"
-    run "$compiler" "${cflags[@]}" -I"$raylib" "$root/examples/save_load.c" -o clockwork_save_load \
-        libclockwork.a libclockwork_raylib.a "${ldflags[@]}" -lpthread -ldl -lrt -lX11
+    sokol=$(bash "$root/tools/prepare-sokol.sh")
+    sokol_flags=(-std=c11 -w -I"$sokol")
+    gui_flags=()
+    gui_libraries=(-lX11 -lXi -lXcursor -lGL -lpthread -ldl)
+    if [ "$(uname -s)" = Darwin ]; then
+        sokol_flags+=(-DSOKOL_METAL -x objective-c)
+        gui_flags+=(-DSOKOL_METAL)
+        gui_libraries=(-framework Cocoa -framework QuartzCore -framework Metal -framework MetalKit)
+    else
+        sokol_flags+=(-DSOKOL_GLCORE)
+        gui_flags+=(-DSOKOL_GLCORE)
+    fi
+    [ "$release" = 1 ] && sokol_flags+=(-O2) || sokol_flags+=(-O1)
+    [ -n "${CW_EXTRA_CFLAGS:-}" ] && sokol_flags+=($CW_EXTRA_CFLAGS)
+    run "$compiler" "${sokol_flags[@]}" -c "$root/examples/sokol_impl.c" -o sokol_impl.o
+    rm -f libclockwork_sokol.a
+    run ar rcs libclockwork_sokol.a sokol_impl.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$sokol" "$root/examples/save_load.c" -o clockwork_save_load \
+        libclockwork.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
     run ./clockwork_save_load --headless | tee save_load.log
     grep -q 'OK: save/load verified' save_load.log || { echo "save/load tool produced unexpected output" >&2; exit 1; }
 fi

@@ -334,7 +334,7 @@ static void test_byte_writer(void) {
     CHECK(!cw_writer_patch_u32(&w, SIZE_MAX, 0));
     size_t before = w.capacity;
     for (int i = 0; i < 100000; ++i) CHECK(cw_writer_u8(&w, (uint8_t)i));
-    CHECK(w.size == sizeof(expected) + 100000 && w.capacity > before && w.data[w.size - 1] == (unsigned char)99999);
+    CHECK(w.size == sizeof(expected) + 100000 && w.capacity > before && w.data[w.size - 1] == (unsigned char)(99999u & 0xffu));
     unsigned char *claimed = cw_writer_claim(&w, 3);
     CHECK(claimed && claimed == w.data + w.size - 3);
     cw_writer_clear(&w);
