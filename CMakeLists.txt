@@ -3,7 +3,7 @@ project(clockwork VERSION 1.0.0 LANGUAGES C)
 
 option(CW_BUILD_TESTS "Build Clockwork regression tests" ON)
 option(CW_BUILD_EXAMPLES "Build the movement example" ON)
-option(CW_BUILD_GUI "Build the interactive save/load tool (downloads pinned Sokol)" ON)
+option(CW_BUILD_GUI "Build the interactive save/load tool (bundled Sokol)" ON)
 option(CW_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
 add_library(clockwork STATIC src/clockwork.c src/cw_sim.c src/cw_commands.c src/cw_bytes.c src/cw_snapshot.c src/cw_file.c)
