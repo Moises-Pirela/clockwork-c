@@ -98,7 +98,7 @@ void cw_sim_dispatch(cw_sim *s, cw_world *w, cw_phase phase, float dt) {
         if (s->paused && pausable(phase) && !reg.run_when_paused) continue;
         reg.fn(w, phase, dt);
     }
-    --s->dispatch_depth;
+    if (--s->dispatch_depth == 0) cw_commands_flush(&w->commands, w);
 }
 void cw_sim_replay(cw_sim *s, cw_world *w, float dt) {
     if (!s || !w) return;
@@ -109,7 +109,7 @@ void cw_sim_replay(cw_sim *s, cw_world *w, float dt) {
         if (reg.enabled && (reg.phases & CW_PHASE(CW_UPDATE)) && reg.authority == CW_SHARED)
             reg.fn(w, CW_UPDATE, dt);
     }
-    --s->dispatch_depth;
+    if (--s->dispatch_depth == 0) cw_commands_flush(&w->commands, w);
 }
 void cw_sim_entity_lifecycle(cw_sim *s, cw_world *w, float dt) {
     if (!s || !w) return;

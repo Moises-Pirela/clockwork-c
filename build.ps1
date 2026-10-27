@@ -5,7 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-if (!(Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio C++ Build Tools are required. Alternatively, use CMake or compile the two C sources directly.' }
+if (!(Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio C++ Build Tools are required. Alternatively, use CMake or compile the three C sources directly.' }
 $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (!$installation) { throw 'No Visual Studio C++ toolchain was found.' }
 if ($Sanitize -and $Compiler -eq 'msvc') {
@@ -40,9 +40,9 @@ $commands = @(
     'set "TMP=%CD%"',
     ('call "' + $devcmd + '" -arch=x64 -host_arch=x64 >nul'),
     'if errorlevel 1 exit /b 1',
-    ($cc + ' ' + $flags + ' /c "' + (Join-Path $PSScriptRoot 'src/clockwork.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_sim.c') + '"'),
+    ($cc + ' ' + $flags + ' /c "' + (Join-Path $PSScriptRoot 'src/clockwork.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_sim.c') + '" "' + (Join-Path $PSScriptRoot 'src/cw_commands.c') + '"'),
     'if errorlevel 1 exit /b 1',
-    'lib /nologo /out:clockwork.lib clockwork.obj cw_sim.obj',
+    'lib /nologo /out:clockwork.lib clockwork.obj cw_sim.obj cw_commands.obj',
     'if errorlevel 1 exit /b 1',
     ($cc + ' ' + $flags + ' "' + (Join-Path $PSScriptRoot 'tests/test_clockwork.c') + '" /Fo:test_clockwork.obj /Fe:clockwork_tests.exe /link clockwork.lib /INCREMENTAL:NO'),
     'if errorlevel 1 exit /b 1',
