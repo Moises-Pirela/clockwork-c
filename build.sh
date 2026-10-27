@@ -93,3 +93,4 @@ run ./clockwork_visualizer --frames 300 | tail -n 8
 echo "Built and tested $out"
 echo "Run $out/clockwork_visualizer in a terminal for the interactive view."
 [ "$gui" = 1 ] && echo "Run $out/clockwork_save_load for the interactive save/load tool."
+exit 0

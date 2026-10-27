@@ -16,6 +16,17 @@ Each invocation builds `clockwork.lib`, runs the regression tests, builds and ru
 
 `-Compiler clang` selects an installed Visual Studio Clang toolchain. `-Sanitize` requires the AddressSanitizer toolchain component. `-NoGui` skips the save/load tool.
 
+On macOS with Xcode Command Line Tools installed (`xcode-select --install`):
+
+```sh
+./build-macos.sh
+./build-macos.sh --release
+./build-macos.sh --sanitize
+./build-macos.sh --no-gui
+```
+
+The macOS entry point selects Apple Clang, the archiver and the macOS SDK through `xcrun`, then runs the shared build and verification steps. Outputs go to `build/clang-debug`, `build/clang-release`, or `build/clang-debug-asan`. The GUI uses Sokol's Metal backend; `--no-gui` builds and tests without downloading Sokol. Run `build/clang-debug/clockwork_save_load` for the window or `build/clang-debug/clockwork_visualizer` for the terminal view. Builds target the current machine's architecture. Script syntax and argument handling are checked on Windows; native macOS execution still needs verification on a Mac.
+
 With CMake and a C11 toolchain:
 
 ```sh
