@@ -1,0 +1,43 @@
+cwscene 1
+game starter 1
+tick 0
+next_id 8
+
+entity 0 "ball"
+  Position x=200 y=150
+  Shape radius=16 r=120 g=200 b=255 kind=circle sprite=@ball.png
+  Mover vx=120 vy=80 bounce=true
+  Sprite material=@ball.cwmat width=48 height=48 rotation=0 layer=1 flip_x=false flip_y=false r=255 g=255 b=255 a=255 columns=1 rows=1 frame=0
+
+entity 1
+  Position x=700 y=400
+  Shape radius=12 r=255 g=140 b=200 kind=circle
+  Mover vx=-160 vy=60 bounce=true
+
+entity 2
+  Position x=480 y=270
+  Shape radius=24 r=230 g=160 b=90 kind=square
+
+entity 3
+  Position x=150 y=430
+  Shape radius=24 r=230 g=160 b=90 kind=square
+
+entity 4
+  Position x=820 y=110
+  Shape radius=24 r=230 g=160 b=90 kind=square
+
+# the interface: entities with the engine's Ui components, laid out on the
+# project's reference resolution (ui 1280 720 in the .cwproj) and scaled to
+# any window. Anchors are fractions of the parent; offsets are pixels.
+entity 5 "title"
+  UiRect parent=-1 anchor_min_x=0 anchor_min_y=0 anchor_max_x=0 anchor_max_y=0 left=16 top=12 right=416 bottom=44 order=0 visible=true
+  UiText text="starter: click bounce" size=2 r=235 g=238 b=245 a=255 align=left valign=middle
+
+entity 6 "bounce button"
+  UiRect parent=-1 anchor_min_x=1 anchor_min_y=0 anchor_max_x=1 anchor_max_y=0 left=-196 top=12 right=-16 bottom=56 order=0 visible=true
+  UiImage material=@button.cwmat r=70 g=110 b=170 a=255 border=0 fill_mode=none fill=1
+  UiButton enabled=true action=1 hover_r=230 hover_g=230 hover_b=230 press_r=160 press_g=160 press_b=160
+
+entity 7 "label"
+  UiRect parent=6 anchor_min_x=0 anchor_min_y=0 anchor_max_x=1 anchor_max_y=1 left=0 top=0 right=0 bottom=0 order=0 visible=true
+  UiText text="bounce" size=1.5 r=255 g=255 b=255 a=255 align=center valign=middle

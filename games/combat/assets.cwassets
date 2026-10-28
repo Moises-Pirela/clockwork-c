@@ -1,0 +1,3 @@
+cwassets 1
+asset 3e8ac034 scene "scenes/arena.cwscene" "arena.cwscene"
+asset 1dfc3333 source "combat_game.c" "combat_game.c"

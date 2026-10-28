@@ -4,3 +4,6 @@
 *.pdb
 *.ilk
 /_deps/
+# game modules and exports are built into each project
+/games/*/build/
+/projects.cwlist

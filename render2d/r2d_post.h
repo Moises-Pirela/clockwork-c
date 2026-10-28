@@ -159,7 +159,12 @@ void r2d_motion_from_cameras(const r2d_camera *previous, const r2d_camera *curre
 
 /* --- the stack owned by the renderer --- */
 r2d_post_params *r2d_post_params_ptr(void);           /* NULL when no stack was created */
-bool r2d_post_active(void);                           /* stack exists, is valid and enabled */
+bool r2d_post_active(void);                           /* stack exists, is valid, enabled and not bypassed */
+/* Bypass: skip the whole stack (the scene goes straight to the window) from
+ * the next frame on without changing the configured params; for tools that
+ * preview the game's rendering settings and want a plain view too. */
+void r2d_post_set_bypass(bool bypass);
+bool r2d_post_bypassed(void);
 bool r2d_post_load_config(const char *path, char *error, size_t error_capacity);   /* also sets the watched path */
 bool r2d_post_save_config(const char *path);          /* NULL: the watched path */
 bool r2d_post_reload_if_changed(void);                /* poll the watched file; true when reloaded */

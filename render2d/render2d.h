@@ -192,7 +192,13 @@ static inline void r2d_camera_fit(r2d_camera *c, r2d_vec2 viewport, r2d_rect wor
 /* ---------------------------------------------------------------------------
  * Setup
  * ------------------------------------------------------------------------- */
-typedef enum { R2D_SPACE_WORLD, R2D_SPACE_SCREEN } r2d_space;
+/* World space is drawn first, sprites (r2d_sprite.h) above it, then the
+ * world overlay (gizmos, selection rings: camera-transformed like world
+ * space but above the sprites), then the HUD (screen coordinates: a game's
+ * own interface, with its sprites below its shapes and text), then screen
+ * space (the host's interface, always on top). The HUD is post-processed
+ * only when the stack applies to the UI, like screen space. */
+typedef enum { R2D_SPACE_WORLD, R2D_SPACE_SCREEN, R2D_SPACE_WORLD_OVERLAY, R2D_SPACE_HUD } r2d_space;
 typedef enum { R2D_MOUSE_LEFT, R2D_MOUSE_RIGHT, R2D_MOUSE_MIDDLE, R2D_MOUSE_BUTTONS } r2d_mouse_button;
 #define R2D_ID_NONE UINT64_MAX
 
@@ -273,6 +279,12 @@ float r2d_wheel(void);              /* vertical scroll this frame, in notches */
 bool r2d_key_down(sapp_keycode key);
 bool r2d_key_pressed(sapp_keycode key);
 bool r2d_key_released(sapp_keycode key);
+bool r2d_key_typed(sapp_keycode key);   /* pressed or auto-repeated this frame (for text editing) */
+unsigned r2d_key_typed_count(sapp_keycode key);   /* how many times, so slow frames lose no repeats */
+/* Characters typed this frame as Unicode code points (control characters
+ * excluded), for text fields. */
+#define R2D_MAX_CHARS 32
+const uint32_t *r2d_chars(size_t *count);
 uint32_t r2d_modifiers(void);       /* SAPP_MODIFIER_* bits */
 bool r2d_mouse_over_ui(void);       /* the mouse is on a UI element; world input should ignore it */
 bool r2d_resized_this_frame(void);
@@ -313,6 +325,11 @@ void r2d_draw_textf(r2d_vec2 pos, r2d_color color, const char *fmt, ...);
 void r2d_draw_text_centered(r2d_vec2 pos, r2d_color color, const char *text);
 float r2d_text_width(const char *text);   /* pixels */
 float r2d_text_height(void);              /* pixels */
+/* Text at an absolute scale: 1 is the 8-pixel font, independent of the UI
+ * text scale (HUD labels, titles). */
+void r2d_draw_text_scaled(r2d_vec2 pos, r2d_color color, float scale, const char *text);
+float r2d_text_width_scaled(float scale, const char *text);
+float r2d_text_height_scaled(float scale);
 
 /* ---------------------------------------------------------------------------
  * Picking and selection

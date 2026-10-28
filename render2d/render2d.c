@@ -9,6 +9,7 @@
 #include "util/sokol_debugtext.h"
 #include "r2d_post_internal.h"
 #include "r2d_lighting_internal.h"
+#include "r2d_sprite_internal.h"
 
 #define R2D_GLYPH 8.0f
 #define R2D_PI 3.14159265358979f
@@ -33,9 +34,10 @@ static struct {
     r2d_camera camera, initial_camera;
     r2d_vec2 viewport;
     float dpi;
-    float dt;
+    float dt, time;
     uint64_t frame;
     bool resized;
+    bool sprites_ready;
     sgl_pipeline pipeline;          /* alpha-blend pipeline of the overlay (window) context */
     r2d_space space;
     /* post-processing: the scene layer is drawn into offscreen contexts whose
@@ -53,6 +55,9 @@ static struct {
     bool button_down[R2D_MOUSE_BUTTONS], button_pressed[R2D_MOUSE_BUTTONS], button_released[R2D_MOUSE_BUTTONS];
     float wheel;
     bool key_down[SAPP_MAX_KEYCODES], key_pressed[SAPP_MAX_KEYCODES], key_released[SAPP_MAX_KEYCODES];
+    uint8_t key_typed[SAPP_MAX_KEYCODES]; /* presses and auto-repeats this frame */
+    uint32_t chars[R2D_MAX_CHARS];       /* characters typed this frame */
+    size_t char_count;
     uint32_t modifiers;
     bool panning;
     int pan_button;
@@ -91,12 +96,13 @@ static void rect_list_push(rect_list *list, r2d_rect r) {
     list->items = grow(list->items, &list->capacity, list->count + 1, sizeof(*list->items));
     list->items[list->count++] = r;
 }
+static bool in_screen_space(void) { return S.space == R2D_SPACE_SCREEN || S.space == R2D_SPACE_HUD; }
 static r2d_vec2 to_screen(r2d_vec2 p) {
-    return S.space == R2D_SPACE_WORLD ? r2d_camera_world_to_screen(&S.camera, S.viewport, p) : p;
+    return !in_screen_space() ? r2d_camera_world_to_screen(&S.camera, S.viewport, p) : p;
 }
-static float to_screen_len(float len) { return S.space == R2D_SPACE_WORLD ? len * S.camera.zoom : len; }
+static float to_screen_len(float len) { return !in_screen_space() ? len * S.camera.zoom : len; }
 static r2d_rect to_screen_rect(r2d_rect r) {
-    if (S.space != R2D_SPACE_WORLD) return r;
+    if (in_screen_space()) return r;
     return r2d_rect_from_points(to_screen(r2d_rect_min(r)), to_screen(r2d_rect_max(r)));
 }
 static bool on_screen(r2d_rect screen_bounds) {
@@ -207,7 +213,7 @@ void r2d_setup(const r2d_desc *desc) {
         sg_desc gfx;
         memset(&gfx, 0, sizeof(gfx));
         gfx.environment = sglue_environment();
-        gfx.logger.func = slog_func;
+        gfx.logger.func = r2d_sprite__gfx_logger;
         sg_setup(&gfx);
         S.setup_gfx = true;
     }
@@ -233,6 +239,7 @@ void r2d_setup(const r2d_desc *desc) {
     sdtx_setup(&text);
     S.valid = sgl_error().any == false;
     S.camera_prev = S.camera;
+    if (S.valid) S.sprites_ready = r2d_sprite__setup();
 
     if (S.valid && !d.no_post_process) {
         sg_environment env = sglue_environment();
@@ -251,6 +258,7 @@ void r2d_setup(const r2d_desc *desc) {
 }
 void r2d_shutdown(void) {
     if (S.valid) {
+        if (S.sprites_ready) r2d_sprite__shutdown();
         destroy_scene_contexts();
         if (S.post_created) r2d_post__destroy();
         sdtx_shutdown();
@@ -321,10 +329,16 @@ void r2d_handle_event(const sapp_event *e) {
             break;
         case SAPP_EVENTTYPE_KEY_DOWN:
             S.modifiers = e->modifiers;
-            if (key_in_range(e->key_code) && !e->key_repeat) {
-                S.key_down[e->key_code] = true;
-                S.key_pressed[e->key_code] = true;
+            if (key_in_range(e->key_code)) {
+                if (S.key_typed[e->key_code] < 255) ++S.key_typed[e->key_code];
+                if (!e->key_repeat) {
+                    S.key_down[e->key_code] = true;
+                    S.key_pressed[e->key_code] = true;
+                }
             }
+            break;
+        case SAPP_EVENTTYPE_CHAR:
+            if (S.char_count < R2D_MAX_CHARS && e->char_code >= 32 && e->char_code != 127) S.chars[S.char_count++] = e->char_code;
             break;
         case SAPP_EVENTTYPE_KEY_UP:
             if (key_in_range(e->key_code)) {
@@ -354,6 +368,12 @@ float r2d_wheel(void) { return S.wheel; }
 bool r2d_key_down(sapp_keycode key) { return key_in_range(key) && S.key_down[key]; }
 bool r2d_key_pressed(sapp_keycode key) { return key_in_range(key) && S.key_pressed[key]; }
 bool r2d_key_released(sapp_keycode key) { return key_in_range(key) && S.key_released[key]; }
+bool r2d_key_typed(sapp_keycode key) { return key_in_range(key) && S.key_typed[key] > 0; }
+unsigned r2d_key_typed_count(sapp_keycode key) { return key_in_range(key) ? S.key_typed[key] : 0; }
+const uint32_t *r2d_chars(size_t *count) {
+    if (count) *count = S.char_count;
+    return S.chars;
+}
 uint32_t r2d_modifiers(void) { return S.modifiers; }
 bool r2d_resized_this_frame(void) { return S.resized; }
 static bool point_over_ui(r2d_vec2 p) {
@@ -421,6 +441,7 @@ void r2d_begin_frame(void) {
     if (S.viewport.y < 1) S.viewport.y = 1;
     double seconds = sapp_frame_duration();
     S.dt = (float)(seconds < 0 ? 0 : (seconds > 0.1 ? 0.1 : seconds));
+    S.time += S.dt;
     S.mouse_delta = r2d_sub(S.mouse, S.mouse_prev);
     S.pending_stats.frame_seconds = seconds;
     camera_controls();
@@ -473,10 +494,17 @@ void r2d_end_frame(void) {
         sgl_set_context(overlay);
     }
     bool ui_in_scene = S.post_frame && r2d_post_params_ptr() && r2d_post_params_ptr()->post.apply_to_ui;
+    sg_environment env = sglue_environment();
     if (S.post_frame && r2d_post__begin_scene(pass.action.colors[0].clear_value)) {
         sgl_context_draw_layer(S.gl_scene, 0);
         sdtx_context_draw_layer(S.text_scene, 0);
+        if (S.sprites_ready) r2d_sprite__flush(r2d_post__scene_color_format(), SG_PIXELFORMAT_NONE, r2d_post__scene_sample_count(), &S.camera, S.viewport, S.time);
+        sgl_context_draw_layer(S.gl_scene, 2);
+        sdtx_context_draw_layer(S.text_scene, 2);
         if (ui_in_scene) {
+            if (S.sprites_ready) r2d_sprite__flush_hud(r2d_post__scene_color_format(), SG_PIXELFORMAT_NONE, r2d_post__scene_sample_count(), S.viewport, S.time);
+            sgl_context_draw_layer(S.gl_scene, 3);
+            sdtx_context_draw_layer(S.text_scene, 3);
             sgl_context_draw_layer(S.gl_scene, 1);
             sdtx_context_draw_layer(S.text_scene, 1);
         }
@@ -489,8 +517,19 @@ void r2d_end_frame(void) {
     }
     sgl_context_draw_layer(overlay, 0);
     sdtx_context_draw_layer(overlay_text, 0);
+    if (!S.post_frame) {
+        if (S.sprites_ready) r2d_sprite__flush(env.defaults.color_format, env.defaults.depth_format, sapp_sample_count(), &S.camera, S.viewport, S.time);
+        sgl_context_draw_layer(overlay, 2);
+        sdtx_context_draw_layer(overlay_text, 2);
+    }
+    if (!ui_in_scene) {   /* the HUD: its sprites, then its shapes and text */
+        if (S.sprites_ready) r2d_sprite__flush_hud(env.defaults.color_format, env.defaults.depth_format, sapp_sample_count(), S.viewport, S.time);
+        sgl_context_draw_layer(overlay, 3);
+        sdtx_context_draw_layer(overlay_text, 3);
+    }
     sgl_context_draw_layer(overlay, 1);
     sdtx_context_draw_layer(overlay_text, 1);
+    if (S.sprites_ready) r2d_sprite__flush_screen(env.defaults.color_format, env.defaults.depth_format, sapp_sample_count(), S.viewport, S.time);
     sg_end_pass();
     sg_commit();
     S.camera_prev = S.camera;
@@ -507,6 +546,8 @@ void r2d_end_frame(void) {
     memset(S.button_released, 0, sizeof(S.button_released));
     memset(S.key_pressed, 0, sizeof(S.key_pressed));
     memset(S.key_released, 0, sizeof(S.key_released));
+    memset(S.key_typed, 0, sizeof(S.key_typed));
+    S.char_count = 0;
     S.wheel = 0;
     S.resized = false;
     S.mouse_prev = S.mouse;
@@ -550,12 +591,13 @@ void r2d_set_space(r2d_space space) {
     bool scene = false;
     if (S.post_frame && S.gl_scene.id) {
         const r2d_post_params *p = r2d_post_params_ptr();
-        scene = space == R2D_SPACE_WORLD || (p && p->post.apply_to_ui);
+        scene = !(space == R2D_SPACE_SCREEN || space == R2D_SPACE_HUD) || (p && p->post.apply_to_ui);
     }
     sgl_set_context(scene ? S.gl_scene : sgl_default_context());
     sdtx_set_context(scene ? S.text_scene : sdtx_default_context());
-    sgl_layer(space == R2D_SPACE_WORLD ? 0 : 1);
-    sdtx_layer(space == R2D_SPACE_WORLD ? 0 : 1);
+    int layer = space == R2D_SPACE_WORLD ? 0 : (space == R2D_SPACE_SCREEN ? 1 : (space == R2D_SPACE_HUD ? 3 : 2));
+    sgl_layer(layer);
+    sdtx_layer(layer);
 }
 r2d_space r2d_get_space(void) { return S.space; }
 
@@ -624,7 +666,7 @@ void r2d_draw_arc(r2d_vec2 center, float radius, float thickness, float start, f
     float r = to_screen_len(radius), t = to_screen_len(thickness);
     if (t < 1.0f) t = 1.0f;
     if (!on_screen(r2d_rect_centered(c, 2 * (r + t), 2 * (r + t)))) return;
-    if (S.space == R2D_SPACE_WORLD && S.camera.y_up) { start = -start; end = -end; }
+    if (!in_screen_space() && S.camera.y_up) { start = -start; end = -end; }
     emit_arc(c, r, t, start, end, color);
 }
 void r2d_draw_rect(r2d_rect rect, r2d_color color) {
@@ -760,6 +802,23 @@ void r2d_draw_text_centered(r2d_vec2 pos, r2d_color color, const char *text) {
 }
 float r2d_text_width(const char *text) { return text ? (float)strlen(text) * R2D_GLYPH * text_scale() : 0; }
 float r2d_text_height(void) { return R2D_GLYPH * text_scale(); }
+void r2d_draw_text_scaled(r2d_vec2 pos, r2d_color color, float scale, const char *text) {
+    if (!S.valid || !text || !(scale > 0)) return;
+    float ts = scale, cell = R2D_GLYPH * ts;   /* absolute: 1 is the 8-pixel font, whatever the UI text scale */
+    r2d_vec2 screen = to_screen(pos);
+    size_t len = strlen(text);
+    if (len > R2D_MAX_TEXT) len = R2D_MAX_TEXT;
+    if (!on_screen(r2d_rect_make(screen.x, screen.y, (float)len * cell, cell))) return;
+    /* debugtext lays glyphs out against the canvas size at put time, so a
+     * temporary canvas scales this run only */
+    sdtx_canvas(S.viewport.x / ts, S.viewport.y / ts);
+    sdtx_pos(screen.x / cell, screen.y / cell);
+    sdtx_color4b(color.r, color.g, color.b, color.a);
+    sdtx_putr(text, (int)len);
+    sdtx_canvas(S.viewport.x / text_scale(), S.viewport.y / text_scale());
+}
+float r2d_text_width_scaled(float scale, const char *text) { return text && scale > 0 ? (float)strlen(text) * R2D_GLYPH * scale : 0; }
+float r2d_text_height_scaled(float scale) { return scale > 0 ? R2D_GLYPH * scale : 0; }
 
 /* ---------------------------------------------------------------------------
  * picking

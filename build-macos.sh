@@ -6,7 +6,7 @@ for argument in "$@"; do
         --release|--sanitize|--no-gui) ;;
         -h|--help)
             printf 'Usage: %s [--release] [--sanitize] [--no-gui]\n' "$0"
-            printf '%s\n' 'Requires Xcode Command Line Tools. Builds the core, tests and Sokol Metal example.'
+            printf '%s\n' 'Requires Xcode Command Line Tools. Builds the engine, the game modules, the tests, the player and the editor (Sokol Metal).'
             exit 0 ;;
         *) printf 'Unknown option: %s\n' "$argument" >&2; exit 2 ;;
     esac

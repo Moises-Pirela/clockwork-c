@@ -1,0 +1,6 @@
+cwproject 1
+name orbit
+module build/orbit_game
+source orbit_game.c
+scenes scenes
+main_scene scenes/system.cwscene

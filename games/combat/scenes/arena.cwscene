@@ -1,0 +1,178 @@
+cwscene 1
+game combat 1
+tick 0
+next_id 26
+
+entity 0
+  Position x=330 y=210
+  Obstacle radius=34
+  ShadowCaster
+
+entity 1
+  Position x=330 y=590
+  Obstacle radius=34
+  ShadowCaster
+
+entity 2 "center pillar"
+  Position x=600 y=400
+  Obstacle radius=34
+  ShadowCaster
+
+entity 3
+  Position x=870 y=210
+  Obstacle radius=34
+  ShadowCaster
+
+entity 4
+  Position x=870 y=590
+  Obstacle radius=34
+  ShadowCaster
+
+entity 5 "west lamp"
+  Position x=40 y=400
+  Light r=255 g=170 b=110 flags=none intensity=2.20000005 radius=680 falloff=1.5 volumetric=1 direction=0 cone=1 flicker=0 flicker_speed=6
+
+entity 6 "east lamp"
+  Position x=1160 y=400
+  Light r=140 g=200 b=255 flags=none intensity=1.39999998 radius=360 falloff=2 volumetric=1 direction=0 cone=1 flicker=0 flicker_speed=6
+
+entity 7
+  Position x=60 y=60
+  Light r=255 g=200 b=130 flags=none intensity=1.60000002 radius=320 falloff=2 volumetric=1.20000005 direction=0 cone=1 flicker=0.25 flicker_speed=6
+
+entity 8
+  Position x=1140 y=60
+  Light r=255 g=200 b=130 flags=none intensity=1.60000002 radius=320 falloff=2 volumetric=1.20000005 direction=0 cone=1 flicker=0.25 flicker_speed=6
+
+entity 9
+  Position x=60 y=740
+  Light r=255 g=200 b=130 flags=none intensity=1.60000002 radius=320 falloff=2 volumetric=1.20000005 direction=0 cone=1 flicker=0.25 flicker_speed=6
+
+entity 10
+  Position x=1140 y=740
+  Light r=255 g=200 b=130 flags=none intensity=1.60000002 radius=320 falloff=2 volumetric=1.20000005 direction=0 cone=1 flicker=0.25 flicker_speed=6
+
+entity 11
+  Position x=160 y=130
+  Velocity x=0 y=0
+  HealthConfig maximum=120
+  Attack damage=12 range=30 cooldown=0.800000012 timer=0 kills=0
+  Unit team=red kind=melee
+  Body radius=12 speed=90
+  ShadowCaster
+
+entity 12
+  Position x=1040 y=130
+  Velocity x=0 y=0
+  HealthConfig maximum=70
+  Attack damage=8 range=170 cooldown=1.10000002 timer=0 kills=0
+  Unit team=blue kind=archer
+  Body radius=10 speed=75
+  ShadowCaster
+
+entity 13
+  Position x=220 y=240
+  Velocity x=0 y=0
+  HealthConfig maximum=70
+  Attack damage=8 range=170 cooldown=1.10000002 timer=0 kills=0
+  Unit team=red kind=archer
+  Body radius=10 speed=75
+  ShadowCaster
+
+entity 14
+  Position x=980 y=240
+  Velocity x=0 y=0
+  HealthConfig maximum=300
+  Attack damage=7 range=34 cooldown=1 timer=0 kills=0
+  Unit team=blue kind=tank
+  Body radius=16 speed=55
+  ShadowCaster
+
+entity 15
+  Position x=160 y=350
+  Velocity x=0 y=0
+  HealthConfig maximum=300
+  Attack damage=7 range=34 cooldown=1 timer=0 kills=0
+  Unit team=red kind=tank
+  Body radius=16 speed=55
+  ShadowCaster
+
+entity 16
+  Position x=1040 y=350
+  Velocity x=0 y=0
+  HealthConfig maximum=120
+  Attack damage=12 range=30 cooldown=0.800000012 timer=0 kills=0
+  Unit team=blue kind=melee
+  Body radius=12 speed=90
+  ShadowCaster
+
+entity 17
+  Position x=220 y=460
+  Velocity x=0 y=0
+  HealthConfig maximum=120
+  Attack damage=12 range=30 cooldown=0.800000012 timer=0 kills=0
+  Unit team=red kind=melee
+  Body radius=12 speed=90
+  ShadowCaster
+
+entity 18
+  Position x=980 y=460
+  Velocity x=0 y=0
+  HealthConfig maximum=70
+  Attack damage=8 range=170 cooldown=1.10000002 timer=0 kills=0
+  Unit team=blue kind=archer
+  Body radius=10 speed=75
+  ShadowCaster
+
+entity 19
+  Position x=160 y=570
+  Velocity x=0 y=0
+  HealthConfig maximum=70
+  Attack damage=8 range=170 cooldown=1.10000002 timer=0 kills=0
+  Unit team=red kind=archer
+  Body radius=10 speed=75
+  ShadowCaster
+
+entity 20
+  Position x=1040 y=570
+  Velocity x=0 y=0
+  HealthConfig maximum=300
+  Attack damage=7 range=34 cooldown=1 timer=0 kills=0
+  Unit team=blue kind=tank
+  Body radius=16 speed=55
+  ShadowCaster
+
+entity 21
+  Position x=220 y=680
+  Velocity x=0 y=0
+  HealthConfig maximum=300
+  Attack damage=7 range=34 cooldown=1 timer=0 kills=0
+  Unit team=red kind=tank
+  Body radius=16 speed=55
+  ShadowCaster
+
+entity 22
+  Position x=980 y=680
+  Velocity x=0 y=0
+  HealthConfig maximum=120
+  Attack damage=12 range=30 cooldown=0.800000012 timer=0 kills=0
+  Unit team=blue kind=melee
+  Body radius=12 speed=90
+  ShadowCaster
+
+# the HUD: a bar across the top of the screen (stretched between the left
+# and right edges of the 1280x720 reference) with a scoreboard per team;
+# the game's scoreboard system writes the texts
+entity 23 "hud bar"
+  UiRect parent=-1 anchor_min_x=0 anchor_min_y=0 anchor_max_x=1 anchor_max_y=0 left=12 top=10 right=-12 bottom=46 order=0 visible=true
+  UiImage material=none r=12 g=14 b=20 a=170 border=0 fill_mode=none fill=1
+
+entity 24 "red score"
+  UiRect parent=23 anchor_min_x=0 anchor_min_y=0 anchor_max_x=0.5 anchor_max_y=1 left=12 top=0 right=0 bottom=0 order=0 visible=true
+  UiText text="red" size=1.5 r=255 g=120 b=110 a=255 align=left valign=middle
+  Scoreboard team=red
+
+entity 25 "blue score"
+  UiRect parent=23 anchor_min_x=0.5 anchor_min_y=0 anchor_max_x=1 anchor_max_y=1 left=0 top=0 right=-12 bottom=0 order=0 visible=true
+  UiText text="blue" size=1.5 r=120 g=170 b=255 a=255 align=right valign=middle
+  Scoreboard team=blue

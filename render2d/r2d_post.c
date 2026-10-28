@@ -20,6 +20,7 @@ typedef struct { float v[8][4]; } uniforms;
 
 static struct {
     bool created, valid, in_scene, targets_ready;
+    bool bypass;                 /* draw straight to the window this frame, whatever the config says */
     r2d_post_params params;      /* as tuned (artistic) */
     r2d_post_params effective;   /* params clamped to the tier in effect; what the passes use */
     r2d_quality_controller controller;
@@ -277,7 +278,9 @@ sg_pixel_format r2d_post__scene_color_format(void) {
     return want_hdr() ? SG_PIXELFORMAT_RGBA16F : SG_PIXELFORMAT_RGBA8;
 }
 int r2d_post__scene_sample_count(void) { return P.swap_samples; }
-bool r2d_post_active(void) { return P.created && P.valid && P.effective.post.enabled; }
+bool r2d_post_active(void) { return P.created && P.valid && P.effective.post.enabled && !P.bypass; }
+void r2d_post_set_bypass(bool bypass) { P.bypass = bypass; }
+bool r2d_post_bypassed(void) { return P.bypass; }
 bool r2d_post__scene_ready(void) { return r2d_post_active() && P.targets_ready; }
 
 /* ---------------------------------------------------------------------------
@@ -304,7 +307,7 @@ void r2d_post__begin_frame(float dt, r2d_vec2 viewport, int width, int height) {
     P.focus_set = false;
     P.passes_this_frame = 0;
     P.targets_ready = false;
-    if (P.valid && P.effective.post.enabled && width > 0 && height > 0) {
+    if (P.valid && P.effective.post.enabled && !P.bypass && width > 0 && height > 0) {
         float scale = P.effective.post.render_scale;
         int sw = (int)((float)width * scale + 0.5f), sh = (int)((float)height * scale + 0.5f);
         if (sw < 1) sw = 1;

@@ -26,6 +26,11 @@ typedef struct {
 } cw_entity;
 
 typedef struct cw_world cw_world;
+/* Reflection metadata for a component (see cw_reflect.h). The core only
+ * carries the pointer: a world is bound to a schema by attaching one
+ * description per registered component, which generic tools (the editor,
+ * the scene format, the generic codec) then consult by component id. */
+typedef struct cw_type_info cw_type_info;
 typedef void (*cw_component_fn)(void *slot);
 typedef struct {
     bool (*marshal)(cw_world *, cw_entity_id, cw_component_id,
@@ -43,6 +48,7 @@ typedef struct {
     cw_component_fn clear, init;
     cw_codec codec;
     bool transient;
+    const cw_type_info *type;    /* reflection, borrowed from the caller; NULL when opaque */
 } cw_component_pool;
 
 typedef struct { cw_entity_id *data; size_t count, capacity; } cw_id_list;
@@ -100,7 +106,8 @@ struct cw_world {
     unsigned next_block;
     uint64_t tick;
     bool recycle_ids;
-    void *user;
+    void *user;                  /* the application's (a game module's) per-world state */
+    const void *host;            /* context the host program attaches (cw_game: the asset registry) */
     uint64_t *visible;           /* one bit per entity: active and not pending destruction */
     cw_query_registry queries;
     cw_observer_registry observers;
@@ -171,6 +178,9 @@ const char *cw_comp_name(const cw_world *w, cw_component_id ct);
 bool cw_comp_by_name(const cw_world *w, const char *name, cw_component_id *ct);
 size_t cw_registered_components(const cw_world *w, cw_component_id *out, size_t capacity);
 bool cw_comp_set_codec(cw_world *w, cw_component_id ct, cw_codec codec);
+/* Attach (or detach with NULL) reflection metadata; the world borrows it. */
+bool cw_comp_set_type(cw_world *w, cw_component_id ct, const cw_type_info *type);
+const cw_type_info *cw_comp_type(const cw_world *w, cw_component_id ct);
 bool cw_comp_set_transient(cw_world *w, cw_component_id ct, bool transient);
 bool cw_comp_is_transient(const cw_world *w, cw_component_id ct);
 bool cw_comp_marshal(cw_world *w, cw_entity_id id, cw_component_id ct,

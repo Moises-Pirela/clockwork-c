@@ -377,6 +377,14 @@ bool cw_comp_register(cw_world *w, cw_component_id ct, size_t size,
     pool_reserve(p, w->capacity > CW_CHUNK_SIZE ? w->capacity : CW_CHUNK_SIZE);
     return true;
 }
+bool cw_comp_set_type(cw_world *w, cw_component_id ct, const cw_type_info *type) {
+    if (!cw_registered(w, ct)) return false;
+    w->pools[ct].type = type;
+    return true;
+}
+const cw_type_info *cw_comp_type(const cw_world *w, cw_component_id ct) {
+    return cw_registered(w, ct) ? w->pools[ct].type : NULL;
+}
 bool cw_comp_register_at(cw_world *w, cw_component_id base, unsigned offset,
                          size_t size, size_t alignment, const char *name, cw_component_fn clear) {
     cw_component_id ct = cw_cid(base, offset);
