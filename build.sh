@@ -59,22 +59,52 @@ run ar rcs libclockwork.a clockwork.o cw_sim.o cw_commands.o cw_bytes.o cw_snaps
 run "$compiler" "${cflags[@]}" "$root/tests/test_clockwork.c" -o clockwork_tests libclockwork.a "${ldflags[@]}"
 run ./clockwork_tests
 
+sokol=$(bash "$root/tools/prepare-sokol.sh")
+run "$compiler" "${cflags[@]}" -I"$root/render2d" -I"$sokol" "$root/tests/test_render2d.c" -o clockwork_render2d_tests "${ldflags[@]}"
+run ./clockwork_render2d_tests
+run "$compiler" "${cflags[@]}" -I"$root/render2d" -I"$sokol" "$root/tests/test_r2d_fx.c" "$root/render2d/r2d_particles.c" "$root/render2d/r2d_effects.c" -o clockwork_r2d_fx_tests "${ldflags[@]}"
+run ./clockwork_r2d_fx_tests
+run "$compiler" "${cflags[@]}" -I"$root/render2d" -I"$sokol" "$root/tests/test_r2d_post.c" "$root/render2d/r2d_post_params.c" "$root/render2d/r2d_tunables.c" "$root/render2d/r2d_shadow.c" "$root/render2d/r2d_quality.c" -o clockwork_r2d_post_tests "${ldflags[@]}"
+run ./clockwork_r2d_post_tests
+
 run "$compiler" "${cflags[@]}" "$root/examples/movement.c" -o clockwork_movement libclockwork.a "${ldflags[@]}"
 run ./clockwork_movement | tee movement.log
 grep -q 'After 30 ticks: (3.00, 1.00)' movement.log || { echo "movement example produced unexpected output" >&2; exit 1; }
 
 if [ "$gui" = 1 ]; then
-    sokol=$(bash "$root/tools/prepare-sokol.sh")
     sokol_flags=(-std=c11 -w -I"$sokol")
     gui_flags=()
-    gui_libraries=(-lX11 -lXi -lXcursor -lGL -lpthread -ldl)
+    gui_libraries=()
     if [ "$(uname -s)" = Darwin ]; then
         sokol_flags+=(-DSOKOL_METAL -x objective-c)
         gui_flags+=(-DSOKOL_METAL)
         gui_libraries=(-framework Cocoa -framework QuartzCore -framework Metal -framework MetalKit)
     else
-        sokol_flags+=(-DSOKOL_GLCORE)
+        # The X11 and OpenGL headers Sokol needs come bundled (third_party/x11,
+        # third_party/gl), so no development package is needed; these -I must
+        # precede any system include path.
+        [ -f "$root/third_party/gl/GL/gl.h" ] || { echo "Bundled OpenGL header missing: third_party/gl/GL/gl.h" >&2; exit 1; }
+        [ -f "$root/third_party/x11/X11/Xlib.h" ] || { echo "Bundled X11 header missing: third_party/x11/X11/Xlib.h" >&2; exit 1; }
+        sokol_flags=(-std=c11 -w -I"$root/third_party/x11" -I"$root/third_party/gl" -I"$sokol" -DSOKOL_GLCORE)
         gui_flags+=(-DSOKOL_GLCORE)
+        # Link each library through its development symlink (-lX) when present,
+        # otherwise directly by runtime file name (-l:libX.so.N), which needs no
+        # -dev package at all.
+        link_library() {
+            if echo 'int main(void){return 0;}' | "$compiler" -x c - -o /dev/null "-l$1" >/dev/null 2>&1; then
+                gui_libraries+=("-l$1")
+            elif echo 'int main(void){return 0;}' | "$compiler" -x c - -o /dev/null "-l:$2" >/dev/null 2>&1; then
+                gui_libraries+=("-l:$2")
+            else
+                echo "Cannot link $1: neither lib$1.so nor $2 was found. The runtime library must be installed (any desktop has it), or use --no-gui." >&2
+                exit 1
+            fi
+        }
+        link_library X11 libX11.so.6
+        link_library Xi libXi.so.6
+        link_library Xcursor libXcursor.so.1
+        link_library GL libGL.so.1
+        gui_libraries+=(-lpthread -ldl)
     fi
     [ "$release" = 1 ] && sokol_flags+=(-O2) || sokol_flags+=(-O1)
     [ -n "${CW_EXTRA_CFLAGS:-}" ] && sokol_flags+=($CW_EXTRA_CFLAGS)
@@ -85,6 +115,24 @@ if [ "$gui" = 1 ]; then
         libclockwork.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
     run ./clockwork_save_load --headless | tee save_load.log
     grep -q 'OK: save/load verified' save_load.log || { echo "save/load tool produced unexpected output" >&2; exit 1; }
+
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/render2d.c" -o render2d.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_particles.c" -o r2d_particles.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_effects.c" -o r2d_effects.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_tunables.c" -o r2d_tunables.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_post_params.c" -o r2d_post_params.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_post.c" -o r2d_post.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_post_shaders.c" -o r2d_post_shaders.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_shadow.c" -o r2d_shadow.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_lighting.c" -o r2d_lighting.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" -c "$root/render2d/r2d_quality.c" -o r2d_quality.o
+    rm -f libclockwork_render2d.a
+    run ar rcs libclockwork_render2d.a render2d.o r2d_particles.o r2d_effects.o r2d_tunables.o r2d_post_params.o r2d_post.o r2d_post_shaders.o r2d_shadow.o r2d_lighting.o r2d_quality.o
+    run cp "$root/tunable.cfg" tunable.cfg
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$sokol" "$root/examples/combat.c" -o clockwork_combat \
+        libclockwork.a libclockwork_render2d.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
+    run ./clockwork_combat --headless combat_test.cwsn | tee combat.log
+    grep -q 'OK: combat demo verified' combat.log || { echo "combat demo produced unexpected output" >&2; exit 1; }
 fi
 
 run "$compiler" "${cflags[@]}" "$root/examples/visualizer.c" -o clockwork_visualizer libclockwork.a "${ldflags[@]}"
@@ -93,4 +141,5 @@ run ./clockwork_visualizer --frames 300 | tail -n 8
 echo "Built and tested $out"
 echo "Run $out/clockwork_visualizer in a terminal for the interactive view."
 [ "$gui" = 1 ] && echo "Run $out/clockwork_save_load for the interactive save/load tool."
+[ "$gui" = 1 ] && echo "Run $out/clockwork_combat for the combat demo (render2d)."
 exit 0
