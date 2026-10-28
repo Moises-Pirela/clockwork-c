@@ -68,7 +68,7 @@ bool hui_textfield(r2d_rect r, const void *key, char *buffer, size_t capacity) {
             size_t len = strlen(S.edit);
             if (chars[i] < 128 && len + 1 < sizeof(S.edit) && len + 1 < capacity) { S.edit[len] = (char)chars[i]; S.edit[len + 1] = 0; }
         }
-        for (unsigned n = r2d_key_typed_count(SAPP_KEYCODE_BACKSPACE); n > 0 && S.edit[0]; --n) S.edit[strlen(S.edit) - 1] = 0;
+        for (unsigned remaining = r2d_key_typed_count(SAPP_KEYCODE_BACKSPACE); remaining > 0 && S.edit[0]; --remaining) S.edit[strlen(S.edit) - 1] = 0;
         if ((r2d_modifiers() & (SAPP_MODIFIER_CTRL | SAPP_MODIFIER_SUPER)) && r2d_key_pressed(SAPP_KEYCODE_A)) S.edit[0] = 0;   /* clear */
         if (r2d_key_pressed(SAPP_KEYCODE_ENTER) || r2d_key_pressed(SAPP_KEYCODE_KP_ENTER) || r2d_key_pressed(SAPP_KEYCODE_TAB)) {
             snprintf(buffer, capacity, "%s", S.edit);

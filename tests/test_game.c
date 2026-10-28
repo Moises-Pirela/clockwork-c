@@ -523,7 +523,7 @@ static void test_assets(void) {
 #endif
     FILE *f = fopen("test_assets_project/scenes/level.cwscene", "w");
     if (f) { fputs("cwscene 1\n", f); fclose(f); }
-    f = fopen("test_assets_source.csv", "w");
+    f = fopen("test_assets_source.csv", "wb");
     if (f) { fputs("a,b\n1,2\n", f); fclose(f); }
     char manifest[256], error[256] = "";
     snprintf(manifest, sizeof(manifest), "%s/assets.cwassets", dir);

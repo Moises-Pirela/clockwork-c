@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS 1
 #include "cw_scene.h"
 #include "cw_internal.h"
 #include <ctype.h>

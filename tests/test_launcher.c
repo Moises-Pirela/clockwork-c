@@ -83,7 +83,11 @@ int main(int argc, char **argv) {
     lc_editor_command(l, 0, "system.cwscene", cmd, sizeof(cmd));
     CHECK(strstr(cmd, "clockwork_editor\" --project \"") && strstr(cmd, "orbit.cwproj\" --scene \"") && strstr(cmd, "system.cwscene"), "editor command: %s", cmd);
     lc_player_command(l, 0, NULL, cmd, sizeof(cmd));
+#ifdef _WIN32
+    CHECK(strstr(cmd, "clockwork_player.exe\" --project \"") && !strstr(cmd, "--scene"), "player command: %s", cmd);
+#else
     CHECK(strstr(cmd, "clockwork_player\" --project \"") && !strstr(cmd, "--scene"), "player command: %s", cmd);
+#endif
     CHECK(!lc_open_in_editor(l, 0, NULL) && strstr(l->status, "not found"), "a missing editor is reported: %s", l->status);
 
     /* creating a project from the template */
@@ -117,13 +121,13 @@ int main(int argc, char **argv) {
     {
         char path[CW_GAME_PATH_CAPACITY + 64];
         snprintf(path, sizeof(path), "%s/assets/images/ball.png", e->project.dir);
-        FILE *f = fopen(path, "rb");
-        CHECK(f != NULL, "template image copied to %s", path);
-        if (f) fclose(f);
+        FILE *source_file = fopen(path, "rb");
+        CHECK(source_file != NULL, "template image copied to %s", path);
+        if (source_file) fclose(source_file);
         snprintf(path, sizeof(path), "%s/materials/ball.cwmat", e->project.dir);
-        f = fopen(path, "rb");
-        CHECK(f != NULL, "template material copied");
-        if (f) fclose(f);
+        source_file = fopen(path, "rb");
+        CHECK(source_file != NULL, "template material copied");
+        if (source_file) fclose(source_file);
         cw_assets assets;
         cw_assets_init(&assets, e->project.assets);
         size_t found = cw_assets_scan(&assets, "");

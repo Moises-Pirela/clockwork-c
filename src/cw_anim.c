@@ -98,7 +98,7 @@ int cw_anim_key_move(cw_anim_track *track, size_t index, float time) {
 
 /* --- evaluation --- */
 float cw_anim_ease(cw_interp interp, float t) {
-    if (t <= 0) return interp == CW_INTERP_STEP ? 0 : 0;
+    if (t <= 0) return 0.0f;
     if (t >= 1) return 1;
     switch (interp) {
         case CW_INTERP_STEP: return 0;

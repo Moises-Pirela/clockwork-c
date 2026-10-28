@@ -355,8 +355,8 @@ int main(int argc, char **argv) {
         if (env && *env) snprintf(ui.layout_path, sizeof(ui.layout_path), "%s", env);
         else if (cfg && *cfg) {
             snprintf(ui.layout_path, sizeof(ui.layout_path), "%s", cfg);
-            char *slash = strrchr(ui.layout_path, '/');
-            if (slash) snprintf(slash + 1, sizeof(ui.layout_path) - (size_t)(slash + 1 - ui.layout_path), "launcher_layout.cfg");
+            char *layout_slash = strrchr(ui.layout_path, '/');
+            if (layout_slash) snprintf(layout_slash + 1, sizeof(ui.layout_path) - (size_t)(layout_slash + 1 - ui.layout_path), "launcher_layout.cfg");
         } else {
 #ifdef _WIN32
             const char *base = getenv("APPDATA");

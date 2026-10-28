@@ -17,6 +17,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#define test_mkdir(path) _mkdir(path)
+#define test_rmdir(path) _rmdir(path)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define test_mkdir(path) mkdir(path, 0755)
+#define test_rmdir(path) rmdir(path)
+#endif
 
 static int checks, failures;
 #define CHECK(cond, ...) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -66,11 +76,11 @@ int main(int argc, char **argv) {
     CHECK(strcmp(d.game.module->name, "combat") == 0 && d.game.library != NULL, "module loaded dynamically");
     CHECK(ed_entity_count(&d) == 26 && !d.dirty && d.scene_path[0], "main scene opened (%zu entities)", ed_entity_count(&d));
     CHECK(strcmp(ed_name_of(&d, 2), "center pillar") == 0, "names loaded: '%s'", ed_name_of(&d, 2));
-    char label[64];
-    ed_label(&d, 2, label, sizeof(label));
-    CHECK(strcmp(label, "center pillar") == 0, "label uses the name");
-    ed_label(&d, 0, label, sizeof(label));
-    CHECK(strcmp(label, "pillar") == 0, "label comes from the module's describe hook: %s", label);
+    char entity_label[64];
+    ed_label(&d, 2, entity_label, sizeof(entity_label));
+    CHECK(strcmp(entity_label, "center pillar") == 0, "label uses the name");
+    ed_label(&d, 0, entity_label, sizeof(entity_label));
+    CHECK(strcmp(entity_label, "pillar") == 0, "label comes from the module's describe hook: %s", entity_label);
     CHECK(!ed_can_undo(&d), "a freshly opened scene has nothing to undo");
 
     /* placing and undo */
@@ -152,16 +162,16 @@ int main(int argc, char **argv) {
     size_t history = d.history_count;
     CHECK(ed_play(&d) && d.playing && !d.paused, "play starts");
     CHECK(cw_comp_has(&d.gw.world, a, comp(&d, "Health")) && value(&d, a, "Health", "current") == 70 && value(&d, a, "Health", "maximum") == 70, "play bakes runtime components from config: %s", d.status);
-    int steps = 0;
-    for (int i = 0; i < 60; ++i) steps += ed_frame(&d, 1.0f / 60.0f);
-    CHECK(steps >= 25 && d.gw.world.tick == (uint64_t)steps, "play advanced %d ticks", steps);
+    int play_steps = 0;
+    for (int i = 0; i < 60; ++i) play_steps += ed_frame(&d, 1.0f / 60.0f);
+    CHECK(play_steps >= 25 && d.gw.world.tick == (uint64_t)play_steps, "play advanced %d ticks", play_steps);
     CHECK(scene_hash(&d) != before_play, "the battle changed the world");
     cw_entity_id extra = ed_place(&d, prefab(&d, "blue", "archer"), 500, 500);
     CHECK(extra != CW_INVALID_ENTITY && d.history_count == history, "edits during play are not recorded");
     ed_toggle_pause(&d);
     CHECK(d.paused && ed_frame(&d, 1.0f) == 0, "pause stops time");
     ed_step(&d, 3);
-    CHECK(d.gw.world.tick == (uint64_t)steps + 3, "step advances while paused");
+    CHECK(d.gw.world.tick == (uint64_t)play_steps + 3, "step advances while paused");
     ed_stop(&d);
     CHECK(!d.playing && scene_hash(&d) == before_play && d.gw.world.tick == 0, "stop restores the scene");
     CHECK(!cw_world_is_valid(&d.gw.world, extra), "entities placed during play are gone");
@@ -268,8 +278,8 @@ int main(int argc, char **argv) {
         CHECK(empty != CW_INVALID_ENTITY && ed_is_selected(&d, empty) && cw_comp_has(&d.gw.world, empty, comp(&d, "Position")), "an empty entity gets the position component");
         CHECK(value(&d, empty, "Position", "x") == 321 && !cw_comp_has(&d.gw.world, empty, comp(&d, "Unit")), "at the requested spot, nothing else");
         CHECK(ed_add_component(&d, empty, comp(&d, "Obstacle")), "components are added in the inspector");
-        ed_label(&d, empty, label, sizeof(label));
-        CHECK(strcmp(label, "pillar") == 0, "the module describes it once it has components: %s", label);
+        ed_label(&d, empty, entity_label, sizeof(entity_label));
+        CHECK(strcmp(entity_label, "pillar") == 0, "the module describes it once it has components: %s", entity_label);
         CHECK(ed_undo(&d) && ed_undo(&d) && !cw_world_is_valid(&d.gw.world, empty), "undo create");
         CHECK(ed_redo(&d) && ed_redo(&d) && cw_comp_has(&d.gw.world, empty, comp(&d, "Obstacle")), "redo");
         /* a prefab from the hero and its torch */
@@ -387,35 +397,48 @@ int main(int argc, char **argv) {
         CHECK(ed_remove_asset(&d, cw_asset_id("greeting.txt"), true) && d.assets.count == before, "remove with delete");
         CHECK(!fopen("../games/combat/assets/data/zz_editor_import.txt", "r"), "file deleted");
         remove("zz_editor_import.txt");
-        (void)!system("rm -rf \"" "zz_editor_dir" "\" && mkdir -p zz_editor_dir && echo a > zz_editor_dir/a.csv && echo b > zz_editor_dir/b.json");
+        remove("zz_editor_dir/a.csv");
+        remove("zz_editor_dir/b.json");
+        test_mkdir("zz_editor_dir");
+        f = fopen("zz_editor_dir/a.csv", "wb");
+        CHECK(f != NULL, "create CSV import fixture");
+        if (f) { fputs("a\n", f); fclose(f); }
+        f = fopen("zz_editor_dir/b.json", "wb");
+        CHECK(f != NULL, "create JSON import fixture");
+        if (f) { fputs("b\n", f); fclose(f); }
         CHECK(ed_import_directory(&d, "zz_editor_dir", false) == 2 && cw_assets_find_name(&d.assets, "a.csv") && cw_assets_find_name(&d.assets, "b.json"), "import a directory: %s", d.status);
         ed_remove_asset(&d, cw_asset_id("a.csv"), true);
         ed_remove_asset(&d, cw_asset_id("b.json"), true);
-        (void)!system("rm -rf zz_editor_dir");
+        remove("zz_editor_dir/a.csv");
+        remove("zz_editor_dir/b.json");
+        test_rmdir("zz_editor_dir");
         CHECK(d.assets.count == before, "back to the scanned set (%zu)", d.assets.count);
         /* assets the editor authors itself (materials, shaders, clips) go through ed_write_asset */
         const char *mat = "cwmaterial 1\nname zz_glow\neffect glow\n";
         const cw_asset *written = ed_write_asset(&d, "materials/zz_glow.cwmat", mat, strlen(mat));
         CHECK(written && written->type == CW_ASSET_MATERIAL && strcmp(written->name, "zz_glow.cwmat") == 0 && d.assets.count == before + 1, "write a material asset: %s", d.status);
         {
-            char path[CW_GAME_PATH_CAPACITY + 64];
-            snprintf(path, sizeof(path), "%smaterials/zz_glow.cwmat", d.project.dir);
+            char material_path[CW_GAME_PATH_CAPACITY + 64];
+            snprintf(material_path, sizeof(material_path), "%smaterials/zz_glow.cwmat", d.project.dir);
             cw_buffer back;
             cw_file_error ferr;
-            CHECK(cw_file_read(path, 0, &back, &ferr) && back.size == strlen(mat) && memcmp(back.data, mat, back.size) == 0, "the file and its directory were created");
+            CHECK(cw_file_read(material_path, 0, &back, &ferr) && back.size == strlen(mat) && memcmp(back.data, mat, back.size) == 0, "the file and its directory were created");
             if (back.data) cw_buffer_free(&back);
             const char *mat2 = "cwmaterial 1\nname zz_glow\neffect flash\n";
             CHECK(ed_write_asset(&d, "materials/zz_glow.cwmat", mat2, strlen(mat2)) == written && d.assets.count == before + 1 && written->size == strlen(mat2), "rewriting refreshes instead of duplicating");
-            cw_assets reread;
-            cw_assets_init(&reread, d.project.assets);
-            CHECK(cw_assets_load(&reread, error, sizeof(error)) && cw_assets_find_name(&reread, "zz_glow.cwmat") != NULL, "the manifest was saved");
-            cw_assets_destroy(&reread);
+            cw_assets material_assets;
+            cw_assets_init(&material_assets, d.project.assets);
+            CHECK(cw_assets_load(&material_assets, error, sizeof(error)) && cw_assets_find_name(&material_assets, "zz_glow.cwmat") != NULL, "the manifest was saved");
+            cw_assets_destroy(&material_assets);
         }
         CHECK(ed_remove_asset(&d, cw_asset_id("zz_glow.cwmat"), true) && d.assets.count == before, "remove the material");
         CHECK(!ed_write_asset(&d, "", "x", 1) && d.status_error, "an empty path is refused");
-        char cleanup[CW_GAME_PATH_CAPACITY * 4 + 64];
-        snprintf(cleanup, sizeof(cleanup), "rm -rf \"%sassets\" \"%sprefabs\" \"%sanimations\" \"%smaterials\"", d.project.dir, d.project.dir, d.project.dir, d.project.dir);   /* the import, prefab, clip and material directories */
-        (void)!system(cleanup);
+        char cleanup[CW_GAME_PATH_CAPACITY + 64];
+        const char *const empty_dirs[] = {"assets/data", "assets", "prefabs", "animations", "materials"};
+        for (size_t i = 0; i < sizeof(empty_dirs) / sizeof(empty_dirs[0]); ++i) {
+            snprintf(cleanup, sizeof(cleanup), "%s%s", d.project.dir, empty_dirs[i]);
+            test_rmdir(cleanup);
+        }
     }
 
     /* world inspection */

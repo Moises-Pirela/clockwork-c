@@ -29,7 +29,7 @@ static bool field_valid(const cw_field *f, size_t size) {
     if (f->type == CW_FIELD_STRING && (f->capacity < 2 || f->capacity > 4096)) return false;
     if (f->offset > size || size - f->offset < n) return false;
     if ((f->type == CW_FIELD_ENUM || f->type == CW_FIELD_FLAGS)
-        && (!f->names || !f->name_count || f->name_count > 8 * (f->type == CW_FIELD_FLAGS ? 1 : 32))) return false;
+        && (!f->names || !f->name_count || f->name_count > 8u * (f->type == CW_FIELD_FLAGS ? 1u : 32u))) return false;
     if (f->type == CW_FIELD_ENUM && f->name_count > 255) return false;
     if (f->semantic == CW_SEM_ASSET && f->type != CW_FIELD_U32) return false;
     if (f->type == CW_FIELD_ENUM || f->type == CW_FIELD_FLAGS)

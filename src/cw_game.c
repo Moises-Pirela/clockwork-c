@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS 1
 #ifndef _WIN32
 #define _DEFAULT_SOURCE 1
 #endif
@@ -64,23 +65,47 @@ bool cw_game_use(cw_game *game, const cw_game_module *module, char *error, size_
     snprintf(game->path, sizeof(game->path), "<static:%s>", module->name);
     return true;
 }
+#ifdef _WIN32
+static void close_library(HMODULE lib, const char *original_path) {
+    char loaded_path[CW_GAME_PATH_CAPACITY], original[CW_GAME_PATH_CAPACITY];
+    DWORD length = GetModuleFileNameA(lib, loaded_path, sizeof(loaded_path));
+    DWORD original_length = GetFullPathNameA(original_path, sizeof(original), original, NULL);
+    bool is_copy = length > 0 && length < sizeof(loaded_path)
+        && original_length > 0 && original_length < sizeof(original) && _stricmp(loaded_path, original) != 0;
+    if (FreeLibrary(lib) && is_copy) DeleteFileA(loaded_path);
+}
+#endif
 bool cw_game_open(cw_game *game, const char *path, char *error, size_t error_capacity) {
     if (!game) return false;
     memset(game, 0, sizeof(*game));
     if (!path || !*path) { set_error(error, error_capacity, "no module path"); return false; }
     cw_game_export_fn export_fn = NULL;
 #ifdef _WIN32
-    HMODULE lib = LoadLibraryA(path);
+    char directory[CW_GAME_PATH_CAPACITY], loaded_path[MAX_PATH];
+    char *filename = NULL;
+    DWORD length = GetFullPathNameA(path, sizeof(directory), directory, &filename);
+    if (!length || length >= sizeof(directory) || !filename) {
+        set_error(error, error_capacity, "cannot resolve module path");
+        return false;
+    }
+    *filename = 0;
+    bool copied = false;
+    if (GetTempFileNameA(directory, "cwg", 0, loaded_path)) {
+        copied = CopyFileA(path, loaded_path, FALSE) != 0;
+        if (!copied) DeleteFileA(loaded_path);
+    }
+    HMODULE lib = LoadLibraryA(copied ? loaded_path : path);
     if (!lib) {
         char message[256];
         snprintf(message, sizeof(message), "cannot load %s (error %lu)", path, (unsigned long)GetLastError());
+        if (copied) DeleteFileA(loaded_path);
         set_error(error, error_capacity, message);
         return false;
     }
     FARPROC proc = GetProcAddress(lib, CW_GAME_EXPORT_SYMBOL);
     memcpy(&export_fn, &proc, sizeof(export_fn));
     if (!export_fn) {
-        FreeLibrary(lib);
+        close_library(lib, path);
         set_error(error, error_capacity, "the library does not export " CW_GAME_EXPORT_SYMBOL);
         return false;
     }
@@ -109,7 +134,7 @@ bool cw_game_open(cw_game *game, const char *path, char *error, size_t error_cap
             set_error(error, error_capacity, message);
         } else set_error(error, error_capacity, "the module table is invalid");
 #ifdef _WIN32
-        FreeLibrary(lib);
+        close_library(lib, path);
 #else
         dlclose(lib);
 #endif
@@ -124,7 +149,7 @@ void cw_game_close(cw_game *game) {
     if (!game) return;
     if (game->library) {
 #ifdef _WIN32
-        FreeLibrary((HMODULE)game->library);
+        close_library((HMODULE)game->library, game->path);
 #else
         dlclose(game->library);
 #endif

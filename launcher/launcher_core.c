@@ -116,11 +116,7 @@ void lc_refresh_entry(lc_entry *e) {
 void lc_refresh(lc_launcher *l) {
     for (size_t i = 0; i < l->count; ++i) lc_refresh_entry(&l->entries[i]);
 }
-int lc_find(const lc_launcher *l, const char *path) {
-    for (size_t i = 0; i < l->count; ++i)
-        if (strcmp(l->entries[i].path, path) == 0) return (int)i;
-    return -1;
-}
+
 static void absolute_path(const char *path, char *out, size_t capacity) {
     cw_project p;   /* cw_project_load resolves paths; for a file that does not parse we fall back */
     char error[64];
@@ -136,6 +132,14 @@ static void absolute_path(const char *path, char *out, size_t capacity) {
     append_str(out, capacity, "/");
     append_str(out, capacity, path);
 #endif
+}
+int lc_find(const lc_launcher *l, const char *path) {
+    if (!l || !path || !*path) return -1;
+    char full[CW_GAME_PATH_CAPACITY];
+    absolute_path(path, full, sizeof(full));
+    for (size_t i = 0; i < l->count; ++i)
+        if (strcmp(l->entries[i].path, full) == 0) return (int)i;
+    return -1;
 }
 int lc_add(lc_launcher *l, const char *path) {
     if (!path || !*path) return -1;

@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS 1
 #include "r2d_sprite_internal.h"
 #include <stdlib.h>
 #include <string.h>

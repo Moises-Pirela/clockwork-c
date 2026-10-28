@@ -240,7 +240,7 @@ static void draw_ui_gizmos(void) {
         if (!ed_is_ui(d, id) || !cw_comp_has(w, id, c->layout)) continue;
         r2d_rect r = ui_layout_rect(id);
         bool primary = id == ed_primary(d);
-        r2d_draw_rect_outline(r, primary ? 2 : 1, yellow);
+        r2d_draw_rect_outline(r, primary ? 2.0f : 1.0f, yellow);
         if (!primary) continue;
         /* the parent's rect and the anchors on it */
         const cw_ui_rect *rect = cw_comp_ptr(w, id, c->rect);
@@ -294,7 +294,7 @@ static bool handle_ui_input(void) {
         float scale = l && l->scale > 0 ? l->scale : 1;
         float dx = (m.x - ui.ui_drag.last.x) / scale, dy = (m.y - ui.ui_drag.last.y) / scale;
         if (ui.prefs.snap && ui.prefs.grid_spacing > 0) {   /* snap the drag to whole reference pixels in grid steps */
-            float step = ui.prefs.grid_spacing >= 8 ? 8 : 1;
+            float step = ui.prefs.grid_spacing >= 8 ? 8.0f : 1.0f;
             dx = floorf(dx / step + 0.5f) * step;
             dy = floorf(dy / step + 0.5f) * step;
             if (dx == 0 && dy == 0) return true;
@@ -1112,10 +1112,10 @@ static void panel_inspector(r2d_rect panel, void *user) {
             if (l.y >= top - ROW_H && l.y + ROW_H <= bottom) {
                 if (runtime) {   /* read-only: generated state is the systems' business */
                     r2d_rect rr = row(&l, ROW_H);
-                    char text[64];
-                    cw_field_format(&t->fields[f], cw_comp_ptr(w, id, ct), text, sizeof(text));
+                    char field_text[64];
+                    cw_field_format(&t->fields[f], cw_comp_ptr(w, id, ct), field_text, sizeof(field_text));
                     r2d_ui_label(r2d_v2(rr.x, rr.y + 5), t->fields[f].name);
-                    r2d_ui_label_colored(r2d_v2(rr.x + 104, rr.y + 5), green, text);
+                    r2d_ui_label_colored(r2d_v2(rr.x + 104, rr.y + 5), green, field_text);
                 } else draw_field(&l, id, ct, &t->fields[f]);
             } else l.y += ROW_H + 4;
             if (!cw_world_is_valid(w, id) || !cw_comp_has(w, id, ct)) break;
@@ -1559,7 +1559,7 @@ static void panel_animation(r2d_rect content, void *user) {
         x += 86;
         static const char *const interp_labels[CW_INTERP_COUNT] = {"linear", "step", "ease", "in", "out"};
         for (int i = 0; i < CW_INTERP_COUNT; ++i) {
-            float bw = i < 3 ? 56 : 36;
+            float bw = i < 3 ? 56.0f : 36.0f;
             if (button(r2d_rect_make(x, r.y, bw, r.h), interp_labels[i], (int)k->interp == i)) ea_key_set_interp(a, (size_t)a->selected_track, (size_t)a->selected_key, (cw_interp)i);
             x += bw + 4;
         }
@@ -2085,12 +2085,12 @@ int main(int argc, char **argv) {
         ui.prefs_saved = ui.prefs;
         /* the dock layout lives next to the preferences */
         ed_settings_path(ui.layout_path, sizeof(ui.layout_path));
-        char *slash = strrchr(ui.layout_path, '/');
+        char *layout_slash = strrchr(ui.layout_path, '/');
 #ifdef _WIN32
-        char *bslash = strrchr(ui.layout_path, '\\');
-        if (!slash || (bslash && bslash > slash)) slash = bslash;
+        char *layout_bslash = strrchr(ui.layout_path, '\\');
+        if (!layout_slash || (layout_bslash && layout_bslash > layout_slash)) layout_slash = layout_bslash;
 #endif
-        if (slash) snprintf(slash + 1, sizeof(ui.layout_path) - (size_t)(slash + 1 - ui.layout_path), "editor_layout.cfg");
+        if (layout_slash) snprintf(layout_slash + 1, sizeof(ui.layout_path) - (size_t)(layout_slash + 1 - ui.layout_path), "editor_layout.cfg");
         else snprintf(ui.layout_path, sizeof(ui.layout_path), "editor_layout.cfg");
         const char *env = getenv("CW_EDITOR_LAYOUT");
         if (env && *env) snprintf(ui.layout_path, sizeof(ui.layout_path), "%s", env);

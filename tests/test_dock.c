@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS 1
 /* Headless checks for the dock layer (runtime/host_dock.c): the layout
  * tree (docking at sides and as tabs, closing, collapsing, reopening),
  * layout persistence, and the frame logic with a scripted mouse (tab

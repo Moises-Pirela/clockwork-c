@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(clockwork VERSION 1.1.0 LANGUAGES C)
 
+if(MSVC AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
+endif()
+
 option(CW_BUILD_TESTS "Build Clockwork regression tests" ON)
 option(CW_BUILD_EXAMPLES "Build the examples that are present in the tree" ON)
 option(CW_BUILD_GAMES "Build the game modules under games/ as shared libraries" ON)
