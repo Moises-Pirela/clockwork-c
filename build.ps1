@@ -21,6 +21,7 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $flags = '/nologo /std:c11 /W4 /WX /TC /I"' + (Join-Path $PSScriptRoot 'include') + '"'
 $flags += if ($Release) { ' /O2 /DNDEBUG' } else { ' /Od /Zi' }
 if ($Sanitize) { $flags += ' /fsanitize=address' }
+$sokolHeaders = & (Join-Path $PSScriptRoot 'tools/prepare-sokol.ps1')
 $cc = 'cl'
 if ($Compiler -eq 'clang') {
     $clang = $null
@@ -53,10 +54,22 @@ $commands = @(
     'if errorlevel 1 exit /b 1',
     'clockwork_movement.exe',
     'if errorlevel 1 exit /b 1',
+    ($cc + ' ' + $flags + ' /I"' + (Join-Path $PSScriptRoot 'render2d') + '" /I"' + $sokolHeaders + '" "' + (Join-Path $PSScriptRoot 'tests/test_render2d.c') + '" /Fo:test_render2d.obj /Fe:clockwork_render2d_tests.exe /link /INCREMENTAL:NO'),
+    'if errorlevel 1 exit /b 1',
+    'clockwork_render2d_tests.exe',
+    'if errorlevel 1 exit /b 1',
+    ($cc + ' ' + $flags + ' /I"' + (Join-Path $PSScriptRoot 'render2d') + '" /I"' + $sokolHeaders + '" "' + (Join-Path $PSScriptRoot 'tests/test_r2d_fx.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_particles.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_effects.c') + '" /Fe:clockwork_r2d_fx_tests.exe /link /INCREMENTAL:NO'),
+    'if errorlevel 1 exit /b 1',
+    'clockwork_r2d_fx_tests.exe',
+    'if errorlevel 1 exit /b 1',
+    ($cc + ' ' + $flags + ' /I"' + (Join-Path $PSScriptRoot 'render2d') + '" /I"' + $sokolHeaders + '" "' + (Join-Path $PSScriptRoot 'tests/test_r2d_post.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post_params.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_tunables.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_shadow.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_quality.c') + '" /Fe:clockwork_r2d_post_tests.exe /link /INCREMENTAL:NO'),
+    'if errorlevel 1 exit /b 1',
+    'clockwork_r2d_post_tests.exe',
+    'if errorlevel 1 exit /b 1',
     'exit /b %errorlevel%'
 )
 if (!$NoGui) {
-    $sokol = & (Join-Path $PSScriptRoot 'tools/prepare-sokol.ps1')
+    $sokol = $sokolHeaders
     $sokolFlags = '/nologo /std:c11 /TC /w /DSOKOL_D3D11 /I"' + $sokol + '"'
     $sokolFlags += if ($Release) { ' /O2' } else { ' /O1' }
     $commands = $commands[0..($commands.Length - 2)] + @(
@@ -67,6 +80,15 @@ if (!$NoGui) {
         ($cc + ' ' + $flags + ' /DSOKOL_D3D11 /I"' + $sokol + '" "' + (Join-Path $PSScriptRoot 'examples/save_load.c') + '" /Fo:save_load.obj /Fe:clockwork_save_load.exe /link clockwork.lib clockwork_sokol.lib d3d11.lib dxgi.lib user32.lib gdi32.lib shell32.lib ole32.lib /INCREMENTAL:NO'),
         'if errorlevel 1 exit /b 1',
         'clockwork_save_load.exe --headless',
+        'if errorlevel 1 exit /b 1',
+        ($cc + ' ' + $flags + ' /DSOKOL_D3D11 /I"' + (Join-Path $PSScriptRoot 'render2d') + '" /I"' + $sokol + '" /c "' + (Join-Path $PSScriptRoot 'render2d/render2d.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_particles.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_effects.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_tunables.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post_params.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post_shaders.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_shadow.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_lighting.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_quality.c') + '"'),
+        'if errorlevel 1 exit /b 1',
+        'lib /nologo /out:clockwork_render2d.lib render2d.obj r2d_particles.obj r2d_effects.obj r2d_tunables.obj r2d_post_params.obj r2d_post.obj r2d_post_shaders.obj r2d_shadow.obj r2d_lighting.obj r2d_quality.obj',
+        ('copy /Y "' + (Join-Path $PSScriptRoot 'tunable.cfg') + '" tunable.cfg >nul'),
+        'if errorlevel 1 exit /b 1',
+        ($cc + ' ' + $flags + ' /DSOKOL_D3D11 /I"' + (Join-Path $PSScriptRoot 'render2d') + '" /I"' + $sokol + '" "' + (Join-Path $PSScriptRoot 'examples/combat.c') + '" /Fo:combat.obj /Fe:clockwork_combat.exe /link clockwork.lib clockwork_render2d.lib clockwork_sokol.lib d3d11.lib dxgi.lib user32.lib gdi32.lib shell32.lib ole32.lib /INCREMENTAL:NO'),
+        'if errorlevel 1 exit /b 1',
+        'clockwork_combat.exe --headless combat_test.cwsn',
         'exit /b %errorlevel%'
     )
 }
