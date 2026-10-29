@@ -7,3 +7,8 @@
 # game modules and exports are built into each project
 /games/*/build/
 /projects.cwlist
+# source archives and their extracted copies
+/*.tar
+/*.tar.gz
+/*.zip
+/*_all_code/
