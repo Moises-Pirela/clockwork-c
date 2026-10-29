@@ -23,6 +23,8 @@ tests/                  engine, game-layer and editor checks, all headless
 
 The engine never includes game code and the games never include renderer or editor code. A game is one C file that registers its components **with reflection** (`cw_reflect_register`), its systems, the prefabs an editor can place, and how its entities draw through a `cw_canvas` of function pointers the host supplies. It is compiled into a shared library (`games/<name>/build/<name>_game.so|.dylib|.dll`) that the editor and the player `dlopen`/`LoadLibrary`, or linked statically into an exported game. The ECS is the only state: the editor edits a `cw_world` bound to the module (`cw_game_world`), the inspector walks the `cw_type_info` the world carries for every registered component, scenes are the world written field by field, and play mode simply runs the module's systems on that same world.
 
+What is missing, unverified or planned next is tracked in [ROADMAP.md](ROADMAP.md).
+
 ## Build
 
 Linux (`gcc` or `clang`; only the X11/GL *runtime* libraries are needed, the headers are bundled):
