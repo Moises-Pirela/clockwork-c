@@ -104,7 +104,7 @@ static void sys_interface(cw_world *w, cw_phase phase, float dt) {
     while (cw_query_next(&q, &id)) {
         Spin *s = cw_comp_ptr(w, id, SPIN);
         s->speed = s->speed * 1.5f;
-        if (fabsf(s->speed) > 20) s->speed = s->speed > 0 ? 1 : -1;
+        if (fabsf(s->speed) > 20.0f) s->speed = s->speed > 0.0f ? 1.0f : -1.0f;
         cw_comp_touch(w, id, SPIN);
     }
 }

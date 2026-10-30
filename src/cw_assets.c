@@ -241,10 +241,8 @@ bool cw_assets_load(cw_assets *a, char *error, size_t error_capacity) {
     }
     const char *p = (const char *)text.data, *end = p + text.size;
     bool header = false, ok = true;
-    int line_no = 0;
     while (ok && p < end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p)), *line_end = nl ? nl : end;
-        ++line_no;
         const char *line = p;
         p = nl ? nl + 1 : end;
         while (line < line_end && isspace((unsigned char)*line)) ++line;
