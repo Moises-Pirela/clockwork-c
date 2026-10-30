@@ -20,10 +20,14 @@ static const r2d_tunable defs[] = {
     {"view", "text_scale", R2D_TUNE_FLOAT, F(text_scale), 1.0f, 0.75f, 2.0f, 0.25f, NULL, 0, "UI glyph size multiplier (8 px glyphs at 1)"},
     {"view", "grid", R2D_TUNE_BOOL, F(grid), 1, 0, 1, 1, NULL, 0, "show the grid when a project opens"},
     {"view", "grid_spacing", R2D_TUNE_FLOAT, F(grid_spacing), 50, 1, 1000, 5, NULL, 0, "world units between grid lines; snapping uses it"},
+    {"view", "grid_spacing_3d", R2D_TUNE_FLOAT, F(grid_spacing_3d), 1, 0.1f, 100, 0.5f, NULL, 0, "grid spacing in 3D projects (metres); snapping uses it"},
     {"view", "preview_rendering", R2D_TUNE_BOOL, F(preview_rendering), 0, 0, 1, 1, NULL, 0, "start with the game's rendering stack (lights, post-processing) on"},
     {"view", "zoom_step", R2D_TUNE_FLOAT, F(zoom_step), 1.15f, 1.01f, 2.0f, 0.05f, NULL, 0, "wheel zoom factor per notch"},
     {"editing", "snap", R2D_TUNE_BOOL, F(snap), 0, 0, 1, 1, NULL, 0, "snap placement, nudges and drags to the grid"},
     {"editing", "nudge", R2D_TUNE_FLOAT, F(nudge), 1, 0.1f, 100, 1, NULL, 0, "arrow-key step in world units (shift multiplies by 10)"},
+    {"editing", "nudge_3d", R2D_TUNE_FLOAT, F(nudge_3d), 0.25f, 0.01f, 100, 0.25f, NULL, 0, "arrow-key step in 3D projects (metres; shift multiplies by 10)"},
+    {"editing", "brush_height", R2D_TUNE_FLOAT, F(brush_height), 1, 0.05f, 100, 0.25f, NULL, 0, "height of a brush drawn with the brush tool (metres)"},
+    {"editing", "texture_lock", R2D_TUNE_BOOL, F(texture_lock), 1, 0, 1, 1, NULL, 0, "brush textures move with their brushes (off: they stay put in world space)"},
     {"editing", "confirm_discard", R2D_TUNE_BOOL, F(confirm_discard), 1, 0, 1, 1, NULL, 0, "ask twice before discarding unsaved scene edits"},
     {"editing", "open_last_scene", R2D_TUNE_BOOL, F(open_last_scene), 1, 0, 1, 1, NULL, 0, "open the project's main scene when the project opens"},
     {"editing", "autosave_seconds", R2D_TUNE_INT, F(autosave_seconds), 0, 0, 3600, 30, NULL, 0, "write <scene>.autosave.cwscene this often while the scene is dirty; 0 disables"},
@@ -86,4 +90,8 @@ bool ed_settings_save(const ed_settings *s, const char *path) {
 float ed_settings_snap(const ed_settings *s, float v) {
     if (!s->snap || s->grid_spacing <= 0) return v;
     return roundf(v / s->grid_spacing) * s->grid_spacing;
+}
+float ed_settings_snap_3d(const ed_settings *s, float v) {
+    if (!s->snap || s->grid_spacing_3d <= 0) return v;
+    return roundf(v / s->grid_spacing_3d) * s->grid_spacing_3d;
 }

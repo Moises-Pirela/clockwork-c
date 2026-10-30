@@ -64,6 +64,7 @@ typedef struct {
 
     bool playing, paused;
     bool no_history;                   /* edits apply but are not recorded (the animation editor's record mode) */
+    bool texture_lock;                 /* 3D: brush textures move with their brushes (default on) */
     ed_image play_backup;
     uint64_t play_ticks;
 
@@ -178,8 +179,61 @@ bool ed_delete_prefab(ed_document *d, uint32_t asset_id);
 size_t ed_list_prefabs(const ed_document *d, const cw_asset **out, size_t capacity);
 size_t ed_delete_selection(ed_document *d);
 size_t ed_duplicate_selection(ed_document *d, float dx, float dy);
+size_t ed_duplicate_selection3(ed_document *d, float dx, float dy, float dz);   /* copies offset on three axes */
 /* Moves without recording; call ed_commit when the drag ends. */
 size_t ed_move_selection(ed_document *d, float dx, float dy);
+/* The 3D forms (cw_reflect_position3): entities without a Z field move in x and y only. */
+size_t ed_move_selection3(ed_document *d, float dx, float dy, float dz);
+cw_entity_id ed_create_entity3(ed_document *d, float x, float y, float z);
+/* Is the project viewed in 3D (its renderer key)? */
+bool ed_is_3d(const ed_document *d);
+/* Switches the project between the 2D and the 3D view (its `renderer` key,
+ * saved into the .cwproj so the player follows); false without a project. */
+bool ed_set_renderer(ed_document *d, cw_renderer_kind kind);
+/* A decal entity (Decal3D at a three-axis position): `size` across and
+ * `depth` along the projection, pitched/yawed so its projection runs against
+ * `normal` (the surface it was clicked on; NULL: flat on the ground), with a
+ * material asset (0: none). Records. */
+cw_entity_id ed_create_decal(ed_document *d, const float point[3], const float normal[3], float size, float depth, uint32_t material);
+bool ed_is_decal(const ed_document *d, cw_entity_id id);
+/* The gizmos' transforms, without recording (commit when the drag ends):
+ * rotation deltas add to the CW_SEM_ROTATION_* fields, scale factors
+ * multiply the CW_SEM_SIZE_* fields (never below 0.01). */
+size_t ed_rotate_selection(ed_document *d, float drx, float dry, float drz);
+size_t ed_scale_selection(ed_document *d, float fx, float fy, float fz);
+
+/* --- level brushes (cw_brush.h) ---
+ * A brush entity carries the game's position component (the box centre)
+ * and the engine's Brush. New brushes take `material` on every face (0:
+ * none). Face edits move one face plane along its axis, keeping the
+ * opposite face; painting colours the lattice vertices of every brush
+ * within `radius` of a world point. */
+cw_entity_id ed_create_brush(ed_document *d, const float lo[3], const float hi[3], uint32_t material);   /* records */
+/* A wedge in that box: the slope rises along `axis` (0 x, 2 z) towards `sign`. */
+cw_entity_id ed_create_wedge(ed_document *d, const float lo[3], const float hi[3], uint32_t material, int axis, float sign);
+/* The clip tool: cuts every selected brush by a world plane (n . p = dist;
+ * the front is where n . p > dist). Keeping both splits each cut brush into
+ * two entities (the copy keeps the front). Returns the brushes cut; records. */
+typedef enum { ED_CLIP_KEEP_BACK, ED_CLIP_KEEP_FRONT, ED_CLIP_KEEP_BOTH } ed_clip_mode;
+size_t ed_clip_selection(ed_document *d, const float n[3], float dist, ed_clip_mode mode);
+/* Per-face texture alignment (shift, rotation, scale); records. */
+bool ed_brush_set_face_align(ed_document *d, cw_entity_id id, int face, const cw_brush_align *align);
+/* CSG. Subtract: the selected brushes carve every other brush they touch
+ * (the pieces become entities with the carved brush's components and name,
+ * the carved brush and the cutters go); returns the pieces made. Hollow:
+ * each selected brush becomes its walls. Both record. */
+size_t ed_csg_subtract(ed_document *d);
+size_t ed_csg_hollow(ed_document *d, float thickness);
+/* Snaps the selected brushes' planes to the grid; records when anything moved. */
+size_t ed_snap_brushes(ed_document *d, float spacing);
+/* The vertex tool: moves a vertex of a brush (the faces through it follow); without recording. */
+bool ed_brush_move_vertex(ed_document *d, cw_entity_id id, const float from[3], const float to[3]);
+bool ed_is_brush(const ed_document *d, cw_entity_id id);
+bool ed_brush_bounds(ed_document *d, cw_entity_id id, float lo[3], float hi[3]);
+bool ed_brush_set_face(ed_document *d, cw_entity_id id, int face, float plane);                          /* without recording */
+bool ed_brush_set_face_material(ed_document *d, cw_entity_id id, int face, uint32_t material);           /* face -1: every face; records */
+size_t ed_paint(ed_document *d, const float point[3], float radius, uint8_t r, uint8_t g, uint8_t b, float strength);   /* without recording */
+size_t ed_paint_clear_selection(ed_document *d);                                                          /* records */
 bool ed_set_field(ed_document *d, cw_entity_id id, cw_component_id ct, const cw_field *field, const char *text);
 bool ed_adjust_field(ed_document *d, cw_entity_id id, cw_component_id ct, const cw_field *field, int direction);
 bool ed_add_component(ed_document *d, cw_entity_id id, cw_component_id ct);   /* runtime types only while playing */

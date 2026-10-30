@@ -147,6 +147,16 @@ int main(int argc, char **argv) {
         memset(&back, 0, sizeof(back));
         CHECK(r2d_material_parse(&back, text, n, error, sizeof(error)), "parse it back: %s", error);
         CHECK(r2d_material_equal(&m, &back), "round trip is lossless");
+        /* the 3D surface block */
+        CHECK(!m.unlit && m.specular[0] == 0.3f && m.shininess == 32 && m.emissive[0] == 0, "surface defaults: lit, a soft highlight, no emission");
+        m.unlit = true; m.specular[1] = 0.9f; m.shininess = 128; m.emissive[2] = 0.5f;
+        n = r2d_material_format(&m, text, sizeof(text));
+        CHECK(strstr(text, "shading unlit") && strstr(text, "specular 0.3 0.9 0.3") && strstr(text, "shininess 128") && strstr(text, "emissive 0 0 0.5"), "surface written:\n%s", text);
+        CHECK(r2d_material_parse(&back, text, n, error, sizeof(error)) && r2d_material_equal(&m, &back) && back.unlit && back.shininess == 128, "surface round trip: %s", error);
+        CHECK(!r2d_material_parse(&back, "cwmaterial 1\nshading glossy\n", 29, error, sizeof(error)) && strstr(error, "shading"), "an unknown shading is rejected: %s", error);
+        CHECK(!r2d_material_parse(&back, "cwmaterial 1\nshininess 0\n", 26, error, sizeof(error)), "a shininess below 1 is rejected");
+        CHECK(r2d_material_parse(&back, "cwmaterial 1\nname old\n", 23, error, sizeof(error)) && !back.unlit && back.shininess == 32, "files without a surface block get the defaults");
+        m.unlit = false; m.specular[1] = 0.3f; m.shininess = 32; m.emissive[2] = 0;
         back.params[1][0] = 4;
         CHECK(!r2d_material_equal(&m, &back), "a parameter change is noticed");
         CHECK(!r2d_material_parse(&back, "cwmaterial 9\n", 13, error, sizeof(error)) && error[0], "wrong version: %s", error);

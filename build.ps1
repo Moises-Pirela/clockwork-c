@@ -36,15 +36,18 @@ if ($Compiler -eq 'clang') {
     if (!$clang) { throw 'Install the Visual Studio Clang compiler component.' }
     $cc = '"' + $clang + '"'
 }
-$engineSources = @('clockwork', 'cw_sim', 'cw_commands', 'cw_bytes', 'cw_snapshot', 'cw_file', 'cw_reflect', 'cw_scene', 'cw_game', 'cw_assets', 'cw_anim', 'cw_ui')
+$engineSources = @('clockwork', 'cw_sim', 'cw_commands', 'cw_bytes', 'cw_snapshot', 'cw_file', 'cw_reflect', 'cw_scene', 'cw_game', 'cw_assets', 'cw_anim', 'cw_ui', 'cw_brush')
 $engineFiles = ($engineSources | ForEach-Object { '"' + (Join-Path $PSScriptRoot "src/$_.c") + '"' }) -join ' '
 $engineObjects = ($engineSources | ForEach-Object { "$_.obj" }) -join ' '
 $combatProject = Join-Path $PSScriptRoot 'games/combat/combat.cwproj'
 $combatModule = Join-Path $PSScriptRoot 'games/combat/build/combat_game.dll'
 $orbitProject = Join-Path $PSScriptRoot 'games/orbit/orbit.cwproj'
 $orbitModule = Join-Path $PSScriptRoot 'games/orbit/build/orbit_game.dll'
+$sandbox3dProject = Join-Path $PSScriptRoot 'games/sandbox3d/sandbox3d.cwproj'
+$sandbox3dModule = Join-Path $PSScriptRoot 'games/sandbox3d/build/sandbox3d_game.dll'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $combatModule) | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $orbitModule) | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $sandbox3dModule) | Out-Null
 $commands = @(
     '@echo off',
     'set "TEMP=%CD%"',
@@ -70,6 +73,8 @@ $commands += @(
     'if errorlevel 1 exit /b 1',
     ($cc + ' ' + $flags + ' /LD ' + $engineFiles + ' "' + (Join-Path $PSScriptRoot 'games/orbit/orbit_game.c') + '" /Fe:"' + $orbitModule + '"'),
     'if errorlevel 1 exit /b 1',
+    ($cc + ' ' + $flags + ' /LD ' + $engineFiles + ' "' + (Join-Path $PSScriptRoot 'games/sandbox3d/sandbox3d_game.c') + '" /Fe:"' + $sandbox3dModule + '"'),
+    'if errorlevel 1 exit /b 1',
     ($cc + ' ' + $flags + ' "' + (Join-Path $PSScriptRoot 'tests/test_game.c') + '" "' + (Join-Path $PSScriptRoot 'games/combat/combat_game.c') + '" /Fe:clockwork_game_tests.exe /link clockwork.lib /INCREMENTAL:NO'),
     'if errorlevel 1 exit /b 1',
     ('clockwork_game_tests.exe "' + $combatModule + '"'),
@@ -80,6 +85,8 @@ $commands += @(
     'if errorlevel 1 exit /b 1',
     ($cc + ' ' + $flags + ' /LD ' + $engineFiles + ' "' + (Join-Path $PSScriptRoot 'launcher/template/game.c') + '" /Fe:starter_template.dll'),
     'if errorlevel 1 exit /b 1',
+    ($cc + ' ' + $flags + ' /LD ' + $engineFiles + ' "' + (Join-Path $PSScriptRoot 'launcher/template3d/game.c') + '" /Fe:starter_template3d.dll'),
+    'if errorlevel 1 exit /b 1',
     ($cc + ' ' + $flags + ' /I"' + (Join-Path $PSScriptRoot 'launcher') + '" "' + (Join-Path $PSScriptRoot 'tests/test_launcher.c') + '" "' + (Join-Path $PSScriptRoot 'launcher/launcher_core.c') + '" /Fe:clockwork_launcher_tests.exe /link clockwork.lib /INCREMENTAL:NO'),
     'if errorlevel 1 exit /b 1',
     ('clockwork_launcher_tests.exe "' + $PSScriptRoot + '" "' + $out + '"'),
@@ -87,6 +94,10 @@ $commands += @(
     ($cc + ' ' + $flags + ' /I"' + (Join-Path $PSScriptRoot 'render2d') + '" /I"' + $sokolHeaders + '" "' + (Join-Path $PSScriptRoot 'tests/test_render2d.c') + '" /Fo:test_render2d.obj /Fe:clockwork_render2d_tests.exe /link /INCREMENTAL:NO'),
     'if errorlevel 1 exit /b 1',
     'clockwork_render2d_tests.exe',
+    'if errorlevel 1 exit /b 1',
+    ($cc + ' ' + $flags + ' /I"' + (Join-Path $PSScriptRoot 'render3d') + '" /I"' + $sokolHeaders + '" "' + (Join-Path $PSScriptRoot 'tests/test_render3d.c') + '" "' + (Join-Path $PSScriptRoot 'render3d/r3d_mesh.c') + '" /Fe:clockwork_render3d_tests.exe /link /INCREMENTAL:NO'),
+    'if errorlevel 1 exit /b 1',
+    'clockwork_render3d_tests.exe',
     'if errorlevel 1 exit /b 1',
     ($cc + ' ' + $flags + ' /I"' + (Join-Path $PSScriptRoot 'render2d') + '" "' + (Join-Path $PSScriptRoot 'tests/test_image.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_image.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_material.c') + '" /Fe:clockwork_image_tests.exe /link /INCREMENTAL:NO'),
     'if errorlevel 1 exit /b 1',
@@ -110,16 +121,25 @@ if (!$NoGui) {
     $sokol = $sokolHeaders
     $sokolFlags = '/nologo /std:c11 /TC /w /DSOKOL_D3D11 /I"' + $sokol + '"'
     $sokolFlags += if ($Release) { ' /O2' } else { ' /O1' }
-    $guiIncludes = ' /DSOKOL_D3D11 /I"' + (Join-Path $PSScriptRoot 'render2d') + '" /I"' + (Join-Path $PSScriptRoot 'runtime') + '" /I"' + $sokol + '"'
-    $guiLibs = 'clockwork.lib clockwork_render2d.lib clockwork_sokol.lib d3d11.lib dxgi.lib user32.lib gdi32.lib shell32.lib ole32.lib /INCREMENTAL:NO'
+    $guiIncludes = ' /DSOKOL_D3D11 /I"' + (Join-Path $PSScriptRoot 'render2d') + '" /I"' + (Join-Path $PSScriptRoot 'render3d') + '" /I"' + (Join-Path $PSScriptRoot 'runtime') + '" /I"' + $sokol + '"'
+    $guiLibs = 'clockwork.lib clockwork_render2d.lib clockwork_render3d.lib clockwork_sokol.lib d3d11.lib dxgi.lib user32.lib gdi32.lib shell32.lib ole32.lib /INCREMENTAL:NO'
     $commands = $commands[0..($commands.Length - 2)] + @(
         ($cc + ' ' + $sokolFlags + ' /c "' + (Join-Path $PSScriptRoot 'examples/sokol_impl.c') + '" /Fo:sokol_impl.obj'),
         'if errorlevel 1 exit /b 1',
         'lib /nologo /out:clockwork_sokol.lib sokol_impl.obj',
         'if errorlevel 1 exit /b 1',
-        ($cc + ' ' + $flags + $guiIncludes + ' /c "' + (Join-Path $PSScriptRoot 'render2d/render2d.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_particles.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_effects.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_tunables.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post_params.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post_shaders.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_shadow.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_lighting.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_quality.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_image.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_material.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_sprite.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_sprite_shaders.c') + '" "' + (Join-Path $PSScriptRoot 'runtime/host_canvas.c') + '" "' + (Join-Path $PSScriptRoot 'runtime/host_ui.c') + '" "' + (Join-Path $PSScriptRoot 'runtime/host_dock.c') + '"'),
+        ($cc + ' ' + $flags + $guiIncludes + ' /c "' + (Join-Path $PSScriptRoot 'render2d/render2d.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_particles.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_effects.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_tunables.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post_params.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_post_shaders.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_shadow.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_lighting.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_quality.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_image.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_material.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_sprite.c') + '" "' + (Join-Path $PSScriptRoot 'render2d/r2d_sprite_shaders.c') + '" "' + (Join-Path $PSScriptRoot 'runtime/host_canvas.c') + '" "' + (Join-Path $PSScriptRoot 'runtime/host_view3d.c') + '" "' + (Join-Path $PSScriptRoot 'runtime/host_ui.c') + '" "' + (Join-Path $PSScriptRoot 'runtime/host_dock.c') + '"'),
         'if errorlevel 1 exit /b 1',
-        'lib /nologo /out:clockwork_render2d.lib render2d.obj r2d_particles.obj r2d_effects.obj r2d_tunables.obj r2d_post_params.obj r2d_post.obj r2d_post_shaders.obj r2d_shadow.obj r2d_lighting.obj r2d_quality.obj r2d_image.obj r2d_material.obj r2d_sprite.obj r2d_sprite_shaders.obj host_canvas.obj host_ui.obj host_dock.obj',
+        'lib /nologo /out:clockwork_render2d.lib render2d.obj r2d_particles.obj r2d_effects.obj r2d_tunables.obj r2d_post_params.obj r2d_post.obj r2d_post_shaders.obj r2d_shadow.obj r2d_lighting.obj r2d_quality.obj r2d_image.obj r2d_material.obj r2d_sprite.obj r2d_sprite_shaders.obj host_canvas.obj host_view3d.obj host_ui.obj host_dock.obj',
+        'if errorlevel 1 exit /b 1',
+        # render3d: the unlit 3D renderer, composited into render2d's frame
+        ($cc + ' ' + $flags + $guiIncludes + ' /c "' + (Join-Path $PSScriptRoot 'render3d/render3d.c') + '" "' + (Join-Path $PSScriptRoot 'render3d/r3d_mesh.c') + '" "' + (Join-Path $PSScriptRoot 'render3d/r3d_shaders.c') + '"'),
+        'if errorlevel 1 exit /b 1',
+        'lib /nologo /out:clockwork_render3d.lib render3d.obj r3d_mesh.obj r3d_shaders.obj',
+        'if errorlevel 1 exit /b 1',
+        # render3d on its own: the four primitives in a window
+        ($cc + ' ' + $flags + $guiIncludes + ' "' + (Join-Path $PSScriptRoot 'examples/shapes3d.c') + '" /Fo:shapes3d.obj /Fe:clockwork_shapes3d.exe /link ' + $guiLibs),
+        'if errorlevel 1 exit /b 1',
         ('copy /Y "' + (Join-Path $PSScriptRoot 'tunable.cfg') + '" tunable.cfg >nul'),
         'if errorlevel 1 exit /b 1',
         # the player: runs any module on a scene
@@ -129,11 +149,16 @@ if (!$NoGui) {
         'if errorlevel 1 exit /b 1',
         ('clockwork_player.exe --project "' + $orbitProject + '" --headless 300'),
         'if errorlevel 1 exit /b 1',
+        ('clockwork_player.exe --project "' + $sandbox3dProject + '" --headless 120'),
+        'if errorlevel 1 exit /b 1',
         # the editor: opens projects, edits scenes, builds games
         ($cc + ' ' + $flags + $guiIncludes + ' /DCW_ENGINE_ROOT=\"' + ($PSScriptRoot -replace '\\', '\\\\') + '\" /I"' + (Join-Path $PSScriptRoot 'editor') + '" "' + (Join-Path $PSScriptRoot 'editor/editor_main.c') + '" "' + (Join-Path $PSScriptRoot 'editor/editor_core.c') + '" "' + (Join-Path $PSScriptRoot 'editor/editor_settings.c') + '" "' + (Join-Path $PSScriptRoot 'editor/editor_anim.c') + '" /Fe:clockwork_editor.exe /link ' + $guiLibs),
         'if errorlevel 1 exit /b 1',
         # the launcher: lists, creates, builds and opens projects
         ($cc + ' ' + $flags + $guiIncludes + ' /DCW_ENGINE_ROOT=\"' + ($PSScriptRoot -replace '\\', '\\\\') + '\" /I"' + (Join-Path $PSScriptRoot 'launcher') + '" "' + (Join-Path $PSScriptRoot 'launcher/launcher_main.c') + '" "' + (Join-Path $PSScriptRoot 'launcher/launcher_core.c') + '" /Fe:clockwork_launcher.exe /link ' + $guiLibs),
+        'if errorlevel 1 exit /b 1',
+        # the product's front door: the same launcher as a windowed application (no console), Clockwork.exe
+        ('link /nologo /OUT:Clockwork.exe /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup launcher_main.obj launcher_core.obj ' + $guiLibs),
         'if errorlevel 1 exit /b 1',
         'exit /b %errorlevel%'
     )
@@ -146,4 +171,4 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Build or tests failed (exit $LASTEXITCODE)." }
 } finally { Pop-Location }
 Write-Host "Built and tested $out"
-if (!$NoGui) { Write-Host "Run $out\clockwork_launcher.exe to create and open projects, $out\clockwork_editor.exe --project games\combat\combat.cwproj for the editor, $out\clockwork_player.exe --project games\combat\combat.cwproj for the game." }
+if (!$NoGui) { Write-Host "Run $out\Clockwork.exe (the launcher, windowed; clockwork_launcher.exe keeps a console) to create and open projects, $out\clockwork_editor.exe --project games\combat\combat.cwproj for the editor, $out\clockwork_player.exe --project games\combat\combat.cwproj for the game." }

@@ -28,6 +28,7 @@
 #include "cw_assets.h"
 #include "cw_anim.h"
 #include "cw_ui.h"
+#include "cw_brush.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,7 +37,7 @@ extern "C" {
 /* Bumped whenever the structures a module and the engine share change
  * (cw_type_info/cw_field, cw_canvas, cw_game_world...), so a module built
  * against an older engine is refused with a message instead of misread. */
-#define CW_GAME_ABI_VERSION 2
+#define CW_GAME_ABI_VERSION 4
 #define CW_GAME_EXPORT_SYMBOL "cw_game_export"
 #define CW_GAME_PATH_CAPACITY 512
 
@@ -66,6 +67,67 @@ typedef struct {
  * eased hover and press (0..1), its fill, seconds since its state changed,
  * and its own four parameters. */
 typedef struct { float state[4]; float params[4]; } cw_canvas_dynamic;
+
+/* The 3D primitives the engine knows (render3d draws them, unlit). A 3D
+ * game's world is right-handed with y up; rotations are Euler radians
+ * applied roll (z), then pitch (x), then yaw (y). */
+typedef enum { CW_SHAPE_SPHERE, CW_SHAPE_CAPSULE, CW_SHAPE_CUBE, CW_SHAPE_PLANE, CW_SHAPE_KINDS } cw_shape3d_kind;
+typedef struct {
+    cw_shape3d_kind kind;
+    float x, y, z;             /* centre */
+    float rx, ry, rz;          /* rotation */
+    float sx, sy, sz;          /* sphere: sx radius; capsule: sx radius, sy height between the cap centres (along its local y);
+                                  cube: full extents; plane: sx by sz on its local y = 0 */
+    cw_rgba color;             /* alpha < 255 blends */
+    float checker;             /* > 0: a world-space checker pattern with that many squares per unit */
+    bool wireframe;
+    uint32_t material;         /* a material asset (texture, specular, emissive...; 0: the colour alone) */
+    cw_entity_id id;           /* the entity to pick when the shape is clicked; CW_INVALID_ENTITY for none */
+} cw_canvas_shape3d;
+/* A 3D light (the Light3D component): ambient adds to the scene's ambient
+ * term; directional lights shine along `direction`; point lights fade out
+ * at `range`; spot lights add a cone (full angle, radians). */
+typedef enum { CW_LIGHT_AMBIENT, CW_LIGHT_DIRECTIONAL, CW_LIGHT_POINT, CW_LIGHT_SPOT, CW_LIGHT_KINDS } cw_light3d_kind;
+typedef struct {
+    cw_light3d_kind kind;
+    float x, y, z;
+    float dx, dy, dz;          /* unit direction */
+    cw_rgba color;
+    float intensity, range, cone;
+    bool shadows;              /* casts shadows (render3d: the first shadowing directional light, the first two spots, the first point light) */
+    cw_entity_id id;
+} cw_canvas_light3d;
+/* A brush (cw_brush.h) at a position: the host builds its faces from the component. */
+typedef struct {
+    const cw_brush *brush;
+    float x, y, z;
+    cw_entity_id id;
+} cw_canvas_brush;
+/* A decal (the Decal3D component): a material projected onto the surfaces
+ * inside its box - `sx` by `sz` across, `sy` deep along its local y, the
+ * projection axis (unrotated: flat on the ground, image top towards -z;
+ * rx = 90 degrees: on a wall facing +z). `max_angle` (radians) skips
+ * surfaces steeper than that to the projection. */
+typedef struct {
+    float x, y, z;
+    float rx, ry, rz;
+    float sx, sy, sz;
+    cw_rgba color;
+    uint32_t material;         /* the texture's alpha cuts the decal out; 0: the tint alone */
+    float max_angle;
+    cw_entity_id id;
+} cw_canvas_decal3d;
+/* The sky behind a 3D scene (the Sky3D component): a gradient from the
+ * ground colour through the horizon to the zenith with a sun disc where the
+ * first directional light shines from, or six images (+x east, -x west, +y
+ * up, -y down, +z south, -z north) wrapped around the scene. */
+typedef struct {
+    cw_rgba zenith, horizon, ground;
+    float sun_size;            /* the disc's angular size, radians; 0 hides it */
+    float sun_intensity;
+    uint32_t images[6];        /* image assets, all six or none */
+    cw_entity_id id;
+} cw_canvas_sky3d;
 
 typedef struct cw_canvas {
     void *impl;
@@ -103,6 +165,16 @@ typedef struct cw_canvas {
                       float u0, float v0, float u1, float v1, const cw_canvas_dynamic *dynamic);
     void (*hud_text)(void *impl, float x, float y, float scale, cw_rgba color, const char *text);
     float (*hud_text_width)(void *impl, float scale, const char *text);
+    /* A 3D primitive (render3d): hosts drawing a 2D view leave this NULL,
+     * and the engine then skips Shape3D components. */
+    void (*shape3d)(void *impl, const cw_canvas_shape3d *shape);
+    /* A 3D light and a level brush (the Light3D and Brush components); NULL in 2D hosts. */
+    void (*light3d)(void *impl, const cw_canvas_light3d *light);
+    void (*brush3d)(void *impl, const cw_canvas_brush *brush);
+    /* The sky (the Sky3D component; the first entity with one sets it). NULL in 2D hosts. */
+    void (*sky3d)(void *impl, const cw_canvas_sky3d *sky);
+    /* A decal (the Decal3D component). NULL in 2D hosts. */
+    void (*decal3d)(void *impl, const cw_canvas_decal3d *decal);
 } cw_canvas;
 
 typedef struct {
@@ -116,7 +188,8 @@ typedef struct {
 typedef struct {
     const char *name;          /* palette label */
     const char *category;      /* palette grouping */
-    /* Fills the components of a freshly created entity at a world position. */
+    /* Fills the components of a freshly created entity at a world position.
+     * In 3D projects the hosts pass ground coordinates: x, and z in `y`. */
     bool (*spawn)(cw_world *w, cw_entity_id id, float x, float y);
 } cw_prefab;
 
@@ -168,6 +241,11 @@ typedef struct cw_game_world {
                                   (default on; an editor turns it off while editing and bakes everything when play starts) */
     cw_component_id animation_ct;   /* the engine's Animation component (cw_anim.h), registered after the module's */
     cw_component_id sprite_ct;      /* the engine's Sprite component (below) */
+    cw_component_id shape3d_ct;     /* the engine's Shape3D component (below) */
+    cw_component_id light3d_ct;     /* the engine's Light3D component */
+    cw_component_id brush_ct;       /* the engine's Brush component (cw_brush.h) */
+    cw_component_id sky3d_ct;       /* the engine's Sky3D component */
+    cw_component_id decal3d_ct;     /* the engine's Decal3D component */
     cw_anim_cache anims;       /* clips loaded from the assets, per world */
     /* the interface (cw_ui.h): its components, the project's canvas, where
      * it is laid out and the mouse the host feeds it */
@@ -191,6 +269,71 @@ typedef struct {
     int32_t columns, rows, frame;
 } cw_sprite;
 extern const cw_type_info cw_sprite_type;
+/* The Shape3D component: one of the engine's 3D primitives at the entity's
+ * position (CW_SEM_POSITION_X/Y/Z; z reads as 0 without a Z field), drawn
+ * by cw_game_world_draw through canvas->shape3d and picked by the entity.
+ * `kind` is a cw_shape3d_kind; the sizes mean what cw_canvas_shape3d says
+ * (width = radius for spheres and capsules, height = a capsule's length). */
+typedef struct {
+    uint8_t kind;
+    float width, height, depth; /* CW_SEM_SIZE_X/Y/Z */
+    float rx, ry, rz;          /* radians; CW_SEM_ROTATION_X/Y/Z */
+    uint8_t r, g, b, a;
+    float checker;
+    bool wireframe;
+    uint32_t material;         /* a material asset (CW_SEM_ASSET): its texture and surface shading; 0 for the colour alone */
+} cw_shape3d;
+extern const cw_type_info cw_shape3d_type;
+extern const char *const cw_shape3d_kind_names[CW_SHAPE_KINDS];
+/* Fills a canvas shape from a component at a position. */
+void cw_shape3d_to_canvas(const cw_shape3d *shape, float x, float y, float z, cw_entity_id id, cw_canvas_shape3d *out);
+/* The Light3D component: a light at the entity's position (ambient and
+ * directional lights ignore it). `pitch`/`yaw` aim directional and spot
+ * lights (radians: pitch 0 is level, negative points down; yaw 0 points
+ * along -z). */
+typedef struct {
+    uint8_t kind;              /* cw_light3d_kind */
+    uint8_t r, g, b;
+    float intensity;
+    float range;               /* point and spot */
+    float pitch, yaw;          /* directional and spot */
+    float cone;                /* spot: the full angle, radians */
+    bool shadows;              /* casts shadows: the first shadowing directional light, the first two spot lights and the first
+                                  point light in the scene get shadow maps (the renderer's limits); ambient lights ignore it */
+} cw_light3d;
+extern const cw_type_info cw_light3d_type;
+extern const char *const cw_light3d_kind_names[CW_LIGHT_KINDS];
+void cw_light3d_to_canvas(const cw_light3d *light, float x, float y, float z, cw_entity_id id, cw_canvas_light3d *out);
+/* The Sky3D component: what a 3D scene shows behind its shapes. The
+ * gradient colours and the sun always apply; the six image assets, when all
+ * are set, wrap the scene instead (the engine's cube map order: east +x,
+ * west -x, up +y, down -y, south +z, north -z). One per scene. */
+typedef struct {
+    uint8_t zenith_r, zenith_g, zenith_b;
+    uint8_t horizon_r, horizon_g, horizon_b;
+    uint8_t ground_r, ground_g, ground_b;
+    float sun_size;            /* radians; 0 hides the disc */
+    float sun_intensity;
+    uint32_t image_east, image_west, image_up, image_down, image_south, image_north;   /* CW_SEM_ASSET images */
+} cw_sky3d;
+extern const cw_type_info cw_sky3d_type;
+void cw_sky3d_to_canvas(const cw_sky3d *sky, cw_entity_id id, cw_canvas_sky3d *out);
+/* The Decal3D component: a material projected onto whatever lies in a box
+ * at the entity's position - `width` (x) by `height` (z) across, `depth`
+ * (y) deep along the projection - rotated by `rx`/`ry`/`rz` like a
+ * Shape3D (unrotated it lies on the ground; pitch it 90 degrees for a wall).
+ * The material's texture alpha shapes it; the colour tints it and its alpha
+ * fades it; `max_angle` (radians, CW_SEM_ANGLE) skips surfaces steeper than
+ * that to the projection, so a floor decal does not smear down a wall. */
+typedef struct {
+    float width, height, depth; /* CW_SEM_SIZE_X / SIZE_Z / SIZE_Y */
+    float rx, ry, rz;          /* CW_SEM_ROTATION_X/Y/Z */
+    uint8_t r, g, b, a;
+    uint32_t material;         /* CW_SEM_ASSET */
+    float max_angle;
+} cw_decal3d;
+extern const cw_type_info cw_decal3d_type;
+void cw_decal3d_to_canvas(const cw_decal3d *decal, float x, float y, float z, cw_entity_id id, cw_canvas_decal3d *out);
 static inline cw_game_world *cw_game_world_of(const cw_world *w) { return w ? (cw_game_world *)w->host : NULL; }
 static inline const cw_assets *cw_assets_of(const cw_world *w) { return w && w->host ? ((const cw_game_world *)w->host)->assets : NULL; }
 bool cw_game_world_init(cw_game_world *gw, const cw_game_module *module, char *error, size_t error_capacity);
@@ -256,7 +399,12 @@ static inline bool cw_game_ui_clicked(cw_world *w, int32_t action) {
  *   window 1280 800                   the player's window size
  *   title Combat                      the player's window title; default the name
  *   ui 1280 720 expand                the interface's reference resolution and scale mode (cw_ui.h); default as shown
+ *   renderer 3d                       2d (default): the world is drawn with render2d's camera; 3d: with render3d's,
+ *                                     Shape3D components and a perspective view (y up)
  */
+typedef enum { CW_RENDERER_2D, CW_RENDERER_3D } cw_renderer_kind;
+const char *cw_renderer_name(cw_renderer_kind kind);
+bool cw_renderer_parse(const char *text, cw_renderer_kind *out);
 #define CW_PROJECT_MAX_SOURCES 16
 typedef struct {
     char path[CW_GAME_PATH_CAPACITY];        /* the .cwproj file */
@@ -272,6 +420,7 @@ typedef struct {
     int window_width, window_height;
     char title[96];
     cw_ui_canvas ui;                         /* the interface's reference resolution and scale mode */
+    cw_renderer_kind renderer;               /* how the hosts view the world */
     /* the values as written, kept so the file can be saved back */
     char module_rel[CW_GAME_PATH_CAPACITY], scenes_rel[CW_GAME_PATH_CAPACITY], main_scene_rel[CW_GAME_PATH_CAPACITY],
          render_rel[CW_GAME_PATH_CAPACITY], assets_rel[CW_GAME_PATH_CAPACITY], sources_rel[CW_PROJECT_MAX_SOURCES][CW_GAME_PATH_CAPACITY];

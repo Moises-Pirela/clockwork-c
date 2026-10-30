@@ -38,6 +38,7 @@ static struct {
     hd_dock dock;
     char layout_path[512];
     char new_name[64], new_dir[CW_GAME_PATH_CAPACITY], add_path[CW_GAME_PATH_CAPACITY];
+    lc_template new_kind;
     float last_click_time;
     int last_click_index;
     float time;
@@ -66,7 +67,7 @@ static void build_selected(void) {
 }
 static void create_project(void) {
     size_t index;
-    if (!lc_create(ui.l, ui.new_dir, ui.new_name, &index)) return;
+    if (!lc_create(ui.l, ui.new_dir, ui.new_name, ui.new_kind, &index)) return;
     select_index((int)index);
     hd_focus(&ui.dock, "details");
     if (lc_build(ui.l, index)) lc_status(ui.l, false, "created and built %s: open it in the editor", ui.l->entries[index].project.name);
@@ -164,9 +165,19 @@ static void panel_new(r2d_rect panel, void *user) {
     char preview[CW_GAME_PATH_CAPACITY * 2 + 64];
     snprintf(preview, sizeof(preview), "-> %s/%s/%s.cwproj", ui.new_dir, ui.new_name[0] ? ui.new_name : "<name>", ui.new_name[0] ? ui.new_name : "<name>");
     hui_line(l, hui_dim, preview);
-    hui_line(l, hui_dim, "creates the project file, a starter game module");
-    hui_line(l, hui_dim, "(components, systems, prefabs, drawing) and a scene,");
-    hui_line(l, hui_dim, "then builds the module so the editor can open it.");
+    hui_line(l, hui_dim, "kind:");
+    r = hui_row(l, ROW_H);
+    if (hui_button(hui_split(r, 0, 2), "2D game", ui.new_kind == LC_TEMPLATE_2D)) ui.new_kind = LC_TEMPLATE_2D;
+    if (hui_button(hui_split(r, 1, 2), "3D level", ui.new_kind == LC_TEMPLATE_3D)) ui.new_kind = LC_TEMPLATE_3D;
+    if (ui.new_kind == LC_TEMPLATE_3D) {
+        hui_line(l, hui_dim, "creates a renderer 3d project: a brush-built room with");
+        hui_line(l, hui_dim, "materials, lights with shadows, primitives and a starter");
+        hui_line(l, hui_dim, "module (components, systems, prefabs), then builds it.");
+    } else {
+        hui_line(l, hui_dim, "creates the project file, a starter game module");
+        hui_line(l, hui_dim, "(components, systems, prefabs, drawing) and a scene,");
+        hui_line(l, hui_dim, "then builds the module so the editor can open it.");
+    }
     r = hui_row(l, 26);
     if (hui_button(hui_split(r, 0, 2), "create and build", lc_name_valid(ui.new_name))) create_project();
     if (hui_button(hui_split(r, 1, 2), "cancel", false)) hd_focus(&ui.dock, "details");

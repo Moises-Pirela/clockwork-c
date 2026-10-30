@@ -81,8 +81,9 @@ static bool write_impl(cw_world *w, const cw_entity_id *ids, size_t id_count, co
             write_text(out, t->name);
             const void *value = cw_comp_ptr(w, id, ct);
             for (size_t f = 0; f < t->field_count; ++f) {
-                char text[160];
+                char text[CW_FIELD_TEXT_CAPACITY];
                 cw_field_format(&t->fields[f], value, text, sizeof(text));
+                if (t->fields[f].type == CW_FIELD_BYTES && !text[0]) continue;   /* an empty byte array is the default: omitted */
                 write_text(out, " ");
                 write_text(out, t->fields[f].name);
                 write_text(out, "=");
@@ -124,7 +125,7 @@ static bool next_line(scanner *s, const char **start, size_t *length) {
     *length = len;
     return true;
 }
-enum { MAX_TOKENS = 64, TOKEN_CAPACITY = 224 };
+enum { MAX_TOKENS = 64, TOKEN_CAPACITY = CW_FIELD_TEXT_CAPACITY + 64 };   /* a field name, '=' and any value, a whole base64 blob included */
 typedef struct { char text[TOKEN_CAPACITY]; bool quoted; } token;
 /* Splits a line into whitespace-separated tokens; a "..." token keeps
  * spaces and understands \" and \\. A '#' outside quotes starts a comment. */
@@ -215,7 +216,8 @@ static bool read_impl(cw_world *w, const char *text, size_t size, const cw_scene
     unsigned char local[1024];
     void *value = local;
     size_t value_capacity = sizeof(local);
-    token tokens[MAX_TOKENS];
+    token *tokens = malloc(sizeof(token) * MAX_TOKENS);   /* too large for the stack now that values may be blobs */
+    cw_require(tokens != NULL);
 
     while (ok && next_line(&s, &line, &len)) {
         bool too_long;
@@ -306,6 +308,7 @@ static bool read_impl(cw_world *w, const char *text, size_t size, const cw_scene
         if (result) ++result->components;
     }
     if (value != local) free(value);
+    free(tokens);
     if (ok && !header) ok = fail(result, 0, "empty file");
     if (!ok) {
         if (instantiate) {

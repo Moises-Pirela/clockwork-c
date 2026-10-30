@@ -65,11 +65,15 @@ int lc_find(const lc_launcher *l, const char *cwproj_path);
 /* --- creating projects ---
  * Creates <parent>/<name>/ with <name>.cwproj, <name>_game.c (a complete
  * starter game: a few components with reflection, systems, prefabs,
- * drawing) and scenes/main.cwscene, then registers it. Names are
- * [A-Za-z][A-Za-z0-9_]* since they become identifiers and file names. */
+ * drawing) and scenes/main.cwscene from one of the templates, then
+ * registers it. Names are [A-Za-z][A-Za-z0-9_]* since they become
+ * identifiers and file names. */
+typedef enum { LC_TEMPLATE_2D, LC_TEMPLATE_3D, LC_TEMPLATE_KINDS } lc_template;   /* launcher/template (a 2D game) or launcher/template3d (brushes, lights, a renderer 3d project) */
 bool lc_name_valid(const char *name);
-bool lc_create(lc_launcher *l, const char *parent_dir, const char *name, size_t *index);
-const char *lc_template_source(void);          /* the starter module, with @NAME@ placeholders */
+bool lc_create(lc_launcher *l, const char *parent_dir, const char *name, lc_template kind, size_t *index);
+const char *lc_template_dir(lc_template kind);    /* relative to the engine root */
+const char *lc_template_name(lc_template kind);
+const char *lc_template_source(void);          /* the 2D starter module, relative to the engine root */
 
 /* --- actions --- */
 /* Command lines the launcher runs; exposed so tests can check them without starting anything. */

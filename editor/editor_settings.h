@@ -15,8 +15,12 @@ typedef struct {
     float text_scale;          /* UI glyph size multiplier */
     bool grid;                 /* show the grid when a project opens */
     float grid_spacing;        /* world units between grid lines (snap uses it too) */
+    float grid_spacing_3d;     /* the same for 3D projects, whose units are metres rather than pixels */
     bool snap;                 /* snap placement, nudges and drags to the grid */
     float nudge;               /* arrow-key step in world units (shift x10) */
+    float nudge_3d;            /* the same for 3D projects */
+    float brush_height;        /* the height of a brush drawn with the brush tool */
+    bool texture_lock;         /* brush textures move with their brushes (off: they stay in world space) */
     bool preview_rendering;    /* start with the game's rendering stack on */
     bool confirm_discard;      /* ask twice before discarding unsaved scene edits */
     float zoom_step;           /* wheel zoom factor per notch */
@@ -34,5 +38,6 @@ bool ed_settings_load(ed_settings *s, const char *path, char *error, size_t erro
 bool ed_settings_save(const ed_settings *s, const char *path);
 /* Snaps a coordinate to the grid when snapping is on. */
 float ed_settings_snap(const ed_settings *s, float v);
+float ed_settings_snap_3d(const ed_settings *s, float v);
 
 #endif

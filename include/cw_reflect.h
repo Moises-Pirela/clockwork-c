@@ -36,6 +36,8 @@ typedef enum {
     CW_FIELD_ENUM,      /* uint8_t index into `names` */
     CW_FIELD_FLAGS,     /* uint8_t bit set; bit i is labelled names[i] */
     CW_FIELD_STRING,    /* char[capacity], NUL-terminated (CW_FIELD_STR); scenes quote it */
+    CW_FIELD_BYTES,     /* a variable-length byte array of fixed capacity (CW_BYTES / CW_FIELD_BLOB): scenes write it in base64,
+                           omitted while empty; the generic codec writes its length and bytes */
     CW_FIELD_TYPES
 } cw_field_type;
 
@@ -48,9 +50,20 @@ typedef enum {
     CW_SEM_ANGLE,       /* radians, shown in degrees */
     CW_SEM_COLOR_R, CW_SEM_COLOR_G, CW_SEM_COLOR_B,
     CW_SEM_RUNTIME,     /* simulation state: saved and loaded, but not shown in the inspector */
-    CW_SEM_ASSET        /* a CW_FIELD_U32 holding an asset id (cw_assets.h): scenes write it as @name,
+    CW_SEM_ASSET,       /* a CW_FIELD_U32 holding an asset id (cw_assets.h): scenes write it as @name,
                            the editor picks it from the project's assets; 0 means none */
+    CW_SEM_POSITION_Z,  /* the third axis of a 3D position (y is up in 3D games); optional next to X and Y */
+    CW_SEM_ROTATION_X,  /* Euler rotation in radians (roll z, then pitch x, then yaw y), shown in degrees; the 3D editor's rotate gizmo */
+    CW_SEM_ROTATION_Y,
+    CW_SEM_ROTATION_Z,
+    CW_SEM_SIZE_X,      /* extents in world units; the 3D editor's scale gizmo */
+    CW_SEM_SIZE_Y,
+    CW_SEM_SIZE_Z
 } cw_field_semantic;
+/* Angles (radians in the data, degrees in the inspector). */
+static inline bool cw_sem_is_angle(cw_field_semantic s) {
+    return s == CW_SEM_ANGLE || s == CW_SEM_ROTATION_X || s == CW_SEM_ROTATION_Y || s == CW_SEM_ROTATION_Z;
+}
 
 typedef struct {
     const char *name;
@@ -97,6 +110,12 @@ struct cw_type_info {
 #define CW_FIELD_NAMED(T, m, ft, labels, n)     {#m, ft, offsetof(T, m), 0, 0, 0, labels, n, CW_SEM_NONE, 0}
 /* A fixed-capacity string member: char m[N]. */
 #define CW_FIELD_STR(T, m)                      {#m, CW_FIELD_STRING, offsetof(T, m), 0, 0, 0, NULL, 0, CW_SEM_NONE, (unsigned)sizeof(((T *)0)->m)}
+/* A byte array member declared with CW_BYTES(N): `size` bytes of `data` are meaningful (at most CW_BYTES_MAX). */
+#define CW_BYTES_MAX 3072
+#define CW_BYTES(N) struct { uint16_t size; uint8_t data[N]; }
+#define CW_FIELD_BLOB(T, m)                     {#m, CW_FIELD_BYTES, offsetof(T, m), 0, 0, 0, NULL, 0, CW_SEM_NONE, (unsigned)sizeof(((T *)0)->m.data)}
+/* Text capacity that holds any field's formatted value (the base64 of a full blob). */
+#define CW_FIELD_TEXT_CAPACITY (CW_BYTES_MAX / 3 * 4 + 16)
 #define CW_TYPE(T, fields_array, defaults_ptr, validate_fn, type_flags) \
     {#T, sizeof(T), _Alignof(T), fields_array, sizeof(fields_array) / sizeof((fields_array)[0]), defaults_ptr, validate_fn, type_flags}
 /* A config type: authored in the editor and scenes, baked into `runtime_name` at run time. */
@@ -143,6 +162,21 @@ bool cw_field_parse(const cw_field *f, void *value, const char *text);
 /* Entity-level helpers driven by semantics. */
 bool cw_reflect_position(cw_world *w, cw_entity_id id, float *x, float *y);
 bool cw_reflect_set_position(cw_world *w, cw_entity_id id, float x, float y);
+/* The 3D position: X and Y as above plus Z, which reads as 0 when the entity
+ * has no CW_SEM_POSITION_Z field (and is then left alone by the setter). */
+bool cw_reflect_position3(cw_world *w, cw_entity_id id, float *x, float *y, float *z);
+bool cw_reflect_set_position3(cw_world *w, cw_entity_id id, float x, float y, float z);
+bool cw_reflect_has_position_z(cw_world *w, cw_entity_id id);
+/* Euler rotation (CW_SEM_ROTATION_*) and extents (CW_SEM_SIZE_*): false when
+ * the entity carries none of the fields; missing axes read 0 (rotation) or
+ * 1 (size) and are left alone by the setters. */
+bool cw_reflect_rotation3(cw_world *w, cw_entity_id id, float *rx, float *ry, float *rz);
+bool cw_reflect_set_rotation3(cw_world *w, cw_entity_id id, float rx, float ry, float rz);
+bool cw_reflect_size3(cw_world *w, cw_entity_id id, float *sx, float *sy, float *sz);
+bool cw_reflect_set_size3(cw_world *w, cw_entity_id id, float sx, float sy, float sz);
+/* Base64 of `size` bytes (no line breaks); the decoder returns the byte count or SIZE_MAX for bad text. */
+size_t cw_base64_encode(const void *data, size_t size, char *out, size_t capacity);
+size_t cw_base64_decode(const char *text, void *out, size_t capacity);
 float cw_reflect_radius(cw_world *w, cw_entity_id id, float fallback);
 /* Rewrites every CW_FIELD_ENTITY reference on `id` through `map`; returns
  * the number of references changed. */

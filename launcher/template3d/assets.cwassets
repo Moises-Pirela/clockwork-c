@@ -1,0 +1,10 @@
+cwassets 1
+asset 946e518a material "materials/glow.cwmat" "glow.cwmat"
+asset c60f3ac9 material "materials/bricks.cwmat" "bricks.cwmat"
+asset 6d702167 material "materials/grass.cwmat" "grass.cwmat"
+asset ff75a468 material "materials/tiles.cwmat" "tiles.cwmat"
+asset bd21d16a image "assets/images/bricks.png" "bricks.png"
+asset 160da667 image "assets/images/tiles.png" "tiles.png"
+asset 2437acd8 image "assets/images/grass.png" "grass.png"
+asset b4cdfe1b material "materials/scorch.cwmat" "scorch.cwmat"
+asset d9f30fa4 image "assets/images/scorch.png" "scorch.png"

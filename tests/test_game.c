@@ -50,8 +50,20 @@ static void c_hud_text(void *i, float x, float y, float scale, cw_rgba c, const 
     snprintf(hud_stats.last_text, sizeof(hud_stats.last_text), "%s", text);
 }
 static float c_hud_text_width(void *i, float scale, const char *text) { (void)i; return 8 * scale * (float)strlen(text); }
+static struct { int count; cw_canvas_shape3d last; } shape_stats;
+static void c_shape3d(void *i, const cw_canvas_shape3d *s) { (void)i; ++shape_stats.count; shape_stats.last = *s; }
+static struct { int count; cw_canvas_light3d last; } light3d_stats;
+static void c_light3d(void *i, const cw_canvas_light3d *l) { (void)i; ++light3d_stats.count; light3d_stats.last = *l; }
+static struct { int count; cw_canvas_brush last; cw_brush brush; } brush_stats;
+static void c_brush3d(void *i, const cw_canvas_brush *b) { (void)i; ++brush_stats.count; brush_stats.last = *b; brush_stats.brush = *b->brush; }
+static struct { int count; cw_canvas_sky3d last; } sky3d_stats;
+static void c_sky3d(void *i, const cw_canvas_sky3d *s) { (void)i; ++sky3d_stats.count; sky3d_stats.last = *s; }
+static struct { int count; cw_canvas_decal3d last; } decal3d_stats;
+static void c_decal3d(void *i, const cw_canvas_decal3d *d) { (void)i; ++decal3d_stats.count; decal3d_stats.last = *d; }
 static const cw_canvas canvas = {NULL, c_circle, c_ring, c_line, c_rect, c_rect_outline, c_oriented, c_triangle, c_bar, c_text, c_px,
-                                 c_light, c_occ_circle, c_occ_rect, c_pick, c_sprite, c_hud_image, c_hud_text, c_hud_text_width};
+                                 c_light, c_occ_circle, c_occ_rect, c_pick, c_sprite, c_hud_image, c_hud_text, c_hud_text_width, c_shape3d, c_light3d, c_brush3d, c_sky3d, c_decal3d};
+static const cw_canvas canvas_2d = {NULL, c_circle, c_ring, c_line, c_rect, c_rect_outline, c_oriented, c_triangle, c_bar, c_text, c_px,
+                                    c_light, c_occ_circle, c_occ_rect, c_pick, c_sprite, c_hud_image, c_hud_text, c_hud_text_width, NULL, NULL, NULL, NULL, NULL};
 
 /* --- helpers --- */
 static size_t prefab_index(const cw_game_module *m, const char *category, const char *name) {
@@ -457,6 +469,171 @@ static void test_simulation_and_canvas(void) {
         cw_writer_destroy(&out);
         cw_comp_remove(w, pillar, gw.sprite_ct);
     }
+    /* the engine's Shape3D component: a 3D primitive at the entity's position, for hosts with a 3D view */
+    CHECK(gw.shape3d_ct != CW_INVALID_COMPONENT && comp(w, "Shape3D") == gw.shape3d_ct && cw_comp_type(w, gw.shape3d_ct) == &cw_shape3d_type, "the world has the engine's Shape3D component");
+    if (pillar != CW_INVALID_ENTITY) {
+        const cw_type_info *t = cw_comp_type(w, gw.shape3d_ct);
+        CHECK(t && cw_type_authored(t) && t->field_count == 14, "Shape3D is reflected and authored");
+        const cw_field *kind = cw_type_field(t, "kind");
+        CHECK(kind && kind->type == CW_FIELD_ENUM && kind->name_count == CW_SHAPE_KINDS && strcmp(kind->names[CW_SHAPE_CAPSULE], "capsule") == 0, "kind is an enum over the four primitives");
+        cw_shape3d shape;
+        cw_type_default(t, &shape);
+        CHECK(shape.kind == CW_SHAPE_CUBE && shape.width == 1 && shape.a == 255, "a new Shape3D is a unit cube");
+        shape.kind = CW_SHAPE_CAPSULE; shape.width = 0.5f; shape.height = 2; shape.depth = 0.5f; shape.ry = 1.5f; shape.r = 10; shape.g = 20; shape.b = 30; shape.a = 128; shape.checker = 2; shape.wireframe = true;
+        cw_comp_set(w, pillar, gw.shape3d_ct, &shape, sizeof(shape));
+        float px = 0, py = 0, pz = -1;
+        CHECK(cw_reflect_position3(w, pillar, &px, &py, &pz) && pz == 0 && !cw_reflect_has_position_z(w, pillar), "a 2D game's position reads with z = 0");
+        memset(&shape_stats, 0, sizeof(shape_stats));
+        cw_game_world_draw(&gw, &canvas, &ctx);
+        CHECK(shape_stats.count == 1 && shape_stats.last.kind == CW_SHAPE_CAPSULE && shape_stats.last.id == pillar, "the shape is drawn once, picking the entity");
+        CHECK(shape_stats.last.x == px && shape_stats.last.y == py && shape_stats.last.z == 0, "at the entity's position");
+        CHECK(shape_stats.last.sx == 0.5f && shape_stats.last.sy == 2 && shape_stats.last.ry == 1.5f && shape_stats.last.color.a == 128 && shape_stats.last.checker == 2 && shape_stats.last.wireframe,
+              "size, rotation, colour, checker and wireframe pass through");
+        memset(&shape_stats, 0, sizeof(shape_stats));
+        cw_game_world_draw(&gw, &canvas_2d, &ctx);
+        CHECK(shape_stats.count == 0, "a host without a 3D view skips Shape3D");
+        /* rotation and size semantics drive the 3D editor's gizmos */
+        float rx, ry, rz, sx, sy, sz;
+        CHECK(cw_reflect_rotation3(w, pillar, &rx, &ry, &rz) && rx == 0 && ry == 1.5f && rz == 0, "rotation read through its semantics");
+        CHECK(cw_reflect_set_rotation3(w, pillar, 0.1f, 0.2f, 0.3f) && cw_reflect_rotation3(w, pillar, &rx, &ry, &rz) && rx == 0.1f && ry == 0.2f && rz == 0.3f, "rotation set");
+        CHECK(cw_reflect_size3(w, pillar, &sx, &sy, &sz) && sx == 0.5f && sy == 2 && sz == 0.5f, "size read through its semantics");
+        CHECK(cw_reflect_set_size3(w, pillar, 1, 2, 3) && cw_reflect_size3(w, pillar, &sx, &sy, &sz) && sx == 1 && sy == 2 && sz == 3, "size set");
+        CHECK(cw_type_field(cw_comp_type(w, gw.shape3d_ct), "ry")->semantic == CW_SEM_ROTATION_Y && cw_sem_is_angle(CW_SEM_ROTATION_Y) && cw_field_step(cw_type_field(cw_comp_type(w, gw.shape3d_ct), "ry")) > 0.08f,
+              "rotation fields are angles (degrees in the inspector, a 5 degree step)");
+        CHECK(cw_type_field(cw_comp_type(w, gw.shape3d_ct), "material")->semantic == CW_SEM_ASSET, "a Shape3D names a material asset");
+        cw_writer out;
+        cw_writer_init(&out);
+        cw_scene_result r;
+        cw_scene_save_config save = {0};
+        CHECK(cw_scene_write_entities(w, &pillar, 1, &save, &out, &r) && strstr(ztext(&out), "Shape3D kind=capsule") && strstr(ztext(&out), "wireframe=true"),
+              "the fragment carries the shape:\n%.*s", (int)out.size, (const char *)out.data);
+        cw_writer_destroy(&out);
+        cw_comp_remove(w, pillar, gw.shape3d_ct);
+    }
+    /* the engine's Light3D: drawn through canvas->light3d with a direction from pitch and yaw */
+    CHECK(gw.light3d_ct != CW_INVALID_COMPONENT && comp(w, "Light3D") == gw.light3d_ct && cw_type_authored(&cw_light3d_type), "the world has the engine's Light3D component");
+    if (pillar != CW_INVALID_ENTITY) {
+        cw_light3d light;
+        cw_type_default(&cw_light3d_type, &light);
+        CHECK(light.kind == CW_LIGHT_POINT && light.intensity == 1 && light.range == 10, "a new light is a point light");
+        light.kind = CW_LIGHT_DIRECTIONAL; light.pitch = -1.5707964f; light.yaw = 0; light.r = 10; light.g = 20; light.b = 30; light.intensity = 2;
+        cw_comp_set(w, pillar, gw.light3d_ct, &light, sizeof(light));
+        memset(&light3d_stats, 0, sizeof(light3d_stats));
+        cw_game_world_draw(&gw, &canvas, &ctx);
+        CHECK(light3d_stats.count == 1 && light3d_stats.last.kind == CW_LIGHT_DIRECTIONAL && light3d_stats.last.id == pillar && light3d_stats.last.intensity == 2 && light3d_stats.last.color.g == 20, "the light is drawn once");
+        CHECK(fabs(light3d_stats.last.dy + 1) < 1e-5 && fabs(light3d_stats.last.dx) < 1e-5 && fabs(light3d_stats.last.dz) < 1e-5, "pitch -90 degrees points straight down (%g %g %g)",
+              (double)light3d_stats.last.dx, (double)light3d_stats.last.dy, (double)light3d_stats.last.dz);
+        light.pitch = 0; light.yaw = 1.5707964f;
+        cw_comp_set(w, pillar, gw.light3d_ct, &light, sizeof(light));
+        cw_game_world_draw(&gw, &canvas, &ctx);
+        CHECK(fabs(light3d_stats.last.dx - 1) < 1e-5 && fabs(light3d_stats.last.dz) < 1e-5, "yaw 90 degrees points along +x");
+        cw_comp_remove(w, pillar, gw.light3d_ct);
+    }
+    /* the engine's Sky3D: the first entity with one sets the 3D view's background; a partial image set keeps the gradient */
+    CHECK(gw.sky3d_ct != CW_INVALID_COMPONENT && comp(w, "Sky3D") == gw.sky3d_ct && cw_type_authored(&cw_sky3d_type), "the world has the engine's Sky3D component");
+    if (pillar != CW_INVALID_ENTITY) {
+        cw_sky3d sky;
+        cw_type_default(&cw_sky3d_type, &sky);
+        CHECK(sky.sun_intensity == 3 && sky.zenith_b == 190 && sky.image_up == 0, "a new sky is a blue gradient with a sun");
+        CHECK(cw_type_field(cw_comp_type(w, gw.sky3d_ct), "image_up")->semantic == CW_SEM_ASSET && cw_asset_type_for_field("image_up") == CW_ASSET_IMAGE, "its faces are image assets");
+        sky.image_up = cw_asset_id("sky_up.png");   /* one of six: not a cube map yet */
+        cw_comp_set(w, pillar, gw.sky3d_ct, &sky, sizeof(sky));
+        memset(&sky3d_stats, 0, sizeof(sky3d_stats));
+        cw_game_world_draw(&gw, &canvas, &ctx);
+        CHECK(sky3d_stats.count == 1 && sky3d_stats.last.id == pillar && sky3d_stats.last.zenith.b == 190 && sky3d_stats.last.sun_size == sky.sun_size, "the sky is drawn once");
+        CHECK(sky3d_stats.last.images[2] == 0, "a partial set of faces falls back to the gradient");
+        sky.image_east = cw_asset_id("e"); sky.image_west = cw_asset_id("w"); sky.image_down = cw_asset_id("d"); sky.image_south = cw_asset_id("s"); sky.image_north = cw_asset_id("n");
+        cw_comp_set(w, pillar, gw.sky3d_ct, &sky, sizeof(sky));
+        cw_game_world_draw(&gw, &canvas, &ctx);
+        CHECK(sky3d_stats.last.images[0] == cw_asset_id("e") && sky3d_stats.last.images[2] == cw_asset_id("sky_up.png") && sky3d_stats.last.images[5] == cw_asset_id("n"),
+              "six faces make the cube map in the +x -x +y -y +z -z order");
+        cw_game_world_draw(&gw, &canvas_2d, &ctx);
+        CHECK(sky3d_stats.count == 2, "2D hosts never see it");
+        cw_comp_remove(w, pillar, gw.sky3d_ct);
+    }
+    /* the engine's Decal3D: a material projected onto the surfaces in a box at the entity's position */
+    CHECK(gw.decal3d_ct != CW_INVALID_COMPONENT && comp(w, "Decal3D") == gw.decal3d_ct && cw_type_authored(&cw_decal3d_type), "the world has the engine's Decal3D component");
+    if (pillar != CW_INVALID_ENTITY) {
+        cw_decal3d decal;
+        cw_type_default(&cw_decal3d_type, &decal);
+        CHECK(decal.width == 1 && decal.height == 1 && decal.depth == 0.5f && decal.a == 255 && fabsf(decal.max_angle - 1.3962634f) < 1e-6f, "a new decal is a metre square, half a metre deep, steeper than 80 degrees skipped");
+        const cw_type_info *dt = cw_comp_type(w, gw.decal3d_ct);
+        CHECK(cw_type_field(dt, "width")->semantic == CW_SEM_SIZE_X && cw_type_field(dt, "height")->semantic == CW_SEM_SIZE_Z && cw_type_field(dt, "depth")->semantic == CW_SEM_SIZE_Y
+              && cw_type_field(dt, "rx")->semantic == CW_SEM_ROTATION_X && cw_type_field(dt, "max_angle")->semantic == CW_SEM_ANGLE && cw_type_field(dt, "material")->semantic == CW_SEM_ASSET,
+              "its sizes follow its local axes (height along z, depth along the projection y), the gizmos drive them");
+        decal.width = 2; decal.height = 3; decal.depth = 0.25f; decal.rx = 1.5f; decal.material = cw_asset_id("scorch.cwmat"); decal.a = 200;
+        cw_comp_set(w, pillar, gw.decal3d_ct, &decal, sizeof(decal));
+        memset(&decal3d_stats, 0, sizeof(decal3d_stats));
+        cw_game_world_draw(&gw, &canvas, &ctx);
+        float px = 0, py = 0, pz = 0;
+        cw_reflect_position3(w, pillar, &px, &py, &pz);
+        CHECK(decal3d_stats.count == 1 && decal3d_stats.last.id == pillar && decal3d_stats.last.x == px && decal3d_stats.last.y == py, "the decal is drawn once, at the entity");
+        CHECK(decal3d_stats.last.sx == 2 && decal3d_stats.last.sz == 3 && decal3d_stats.last.sy == 0.25f && decal3d_stats.last.rx == 1.5f && decal3d_stats.last.color.a == 200
+              && decal3d_stats.last.material == cw_asset_id("scorch.cwmat"), "with its box (x width, z height, y depth), rotation, tint and material");
+        cw_game_world_draw(&gw, &canvas_2d, &ctx);
+        CHECK(decal3d_stats.count == 1, "2D hosts never see it");
+        cw_writer out;
+        cw_writer_init(&out);
+        cw_scene_result r;
+        cw_scene_save_config save = {0};
+        CHECK(cw_scene_write_entities(w, &pillar, 1, &save, &out, &r) && strstr(ztext(&out), "Decal3D width=2") && strstr(ztext(&out), "rx=1.5"), "it saves with the scene");
+        cw_writer_destroy(&out);
+        cw_comp_remove(w, pillar, gw.decal3d_ct);
+    }
+    /* the engine's Brush: level geometry with per-face materials and vertex paint that travels with the scene */
+    CHECK(gw.brush_ct != CW_INVALID_COMPONENT && comp(w, "Brush") == gw.brush_ct && cw_type_authored(&cw_brush_type), "the world has the engine's Brush component");
+    if (pillar != CW_INVALID_ENTITY) {
+        cw_brush brush;
+        cw_type_default(&cw_brush_type, &brush);
+        CHECK(brush.width == 1 && brush.subdivisions == 2 && brush.texture_scale == 1 && brush.paint.size == 0 && !cw_brush_painted(&brush), "a new brush is a unit cube, unpainted");
+        brush.width = 4; brush.height = 2; brush.depth = 6;
+        brush.material[CW_FACE_TOP] = cw_asset_id("grass.cwmat");
+        float px = 0, py = 0, pz = 0;
+        cw_reflect_position3(w, pillar, &px, &py, &pz);
+        float center[3] = {px, py, pz}, point[3] = {px + 2, py + 1, pz + 3};
+        CHECK(cw_brush_paint_at(&brush, center, point, 1.5f, 255, 0, 0, 1) > 0 && cw_brush_painted(&brush) && (size_t)brush.paint.size == cw_brush_paint_size(&brush), "painting initialises the lattice and touches the corner");
+        uint8_t rgb[3];
+        cw_brush_paint_get(&brush, CW_FACE_TOP, 2, 2, rgb);   /* the top face's (+x, +z) corner: u = x, v = z */
+        CHECK(rgb[0] == 255 && rgb[1] == 0 && rgb[2] == 0, "the corner vertex took the colour fully (%u %u %u)", rgb[0], rgb[1], rgb[2]);
+        cw_brush_paint_get(&brush, CW_FACE_TOP, 0, 0, rgb);
+        CHECK(rgb[1] == 255, "the far corner is untouched");
+        cw_comp_set(w, pillar, gw.brush_ct, &brush, sizeof(brush));
+        memset(&brush_stats, 0, sizeof(brush_stats));
+        cw_game_world_draw(&gw, &canvas, &ctx);
+        CHECK(brush_stats.count == 1 && brush_stats.last.id == pillar && brush_stats.last.x == px && brush_stats.brush.depth == 6 && brush_stats.brush.material[CW_FACE_TOP] == cw_asset_id("grass.cwmat"),
+              "the brush is drawn once with its component");
+        /* scenes carry the paint as base64 and read it back */
+        cw_writer out;
+        cw_writer_init(&out);
+        cw_scene_result r;
+        cw_scene_save_config save = {0};
+        CHECK(cw_scene_write_entities(w, &pillar, 1, &save, &out, &r) && strstr(ztext(&out), "Brush width=4") && strstr(ztext(&out), "paint=") && strstr(ztext(&out), "mat_top="),
+              "the fragment carries the brush and its paint (the material id stays numeric: the test registers no assets)");
+        cw_world w2;
+        cw_world_init(&w2, NULL);
+        cw_comp_block(&w2, 1);
+        CHECK(cw_reflect_register(&w2, 0, &cw_brush_type), "register Brush in a fresh world");
+        cw_scene_load_config lc = {0};
+        lc.ignore_unknown_components = true;   /* the fragment also carries the pillar's own components */
+        cw_entity_id made[4];
+        size_t n = 0;
+        cw_scene_result r2;
+        CHECK(cw_scene_instantiate(&w2, ztext(&out), out.size, &lc, false, 0, 0, made, 4, &n, &r2) && n == 1, "instantiate the fragment: %s", r2.message);
+        if (n == 1) {
+            const cw_brush *back = cw_comp_ptr(&w2, made[0], 0);
+            CHECK(back && back->paint.size == brush.paint.size && memcmp(back->paint.data, brush.paint.data, brush.paint.size) == 0 && back->material[CW_FACE_TOP] == brush.material[CW_FACE_TOP],
+                  "the paint and materials survive the text round trip");
+        }
+        cw_world_destroy(&w2);
+        cw_writer_destroy(&out);
+        /* an unpainted brush writes no paint field at all */
+        cw_brush_paint_clear(&brush);
+        cw_comp_set(w, pillar, gw.brush_ct, &brush, sizeof(brush));
+        cw_writer_init(&out);
+        CHECK(cw_scene_write_entities(w, &pillar, 1, &save, &out, &r) && !strstr(ztext(&out), "paint="), "unpainted brushes stay compact");
+        cw_writer_destroy(&out);
+        cw_comp_remove(w, pillar, gw.brush_ct);
+    }
     cw_game_world_destroy(&gw);
     cw_game_close(&game);
 }
@@ -467,12 +644,13 @@ static void test_project(void) {
     CHECK(f != NULL, "write project");
     if (!f) return;
     fputs("cwproject 1\nname demo\n# comment\nmodule build/demo_game\nsource demo_game.c\nsource extra/more.c\nscenes levels\nmain_scene levels/start.cwscene\n"
-          "render look/render.cfg\nwindow 1024 600\ntitle Demo Game\nui 1920 1080 shrink\n", f);
+          "render look/render.cfg\nwindow 1024 600\ntitle Demo Game\nui 1920 1080 shrink\nrenderer 3d\n", f);
     fclose(f);
     cw_project p;
     char error[256] = "";
     CHECK(cw_project_load(&p, path, error, sizeof(error)), "project load: %s", error);
     CHECK(strcmp(p.name, "demo") == 0 && p.source_count == 2, "name and sources");
+    CHECK(p.renderer == CW_RENDERER_3D && strcmp(cw_renderer_name(p.renderer), "3d") == 0, "the renderer key");
     CHECK(strstr(p.render, "look/render.cfg") && p.window_width == 1024 && p.window_height == 600 && strcmp(p.title, "Demo Game") == 0, "render, window and title");
     CHECK(p.ui.width == 1920 && p.ui.height == 1080 && p.ui.mode == CW_UI_SCALE_SHRINK, "the interface canvas");
     /* saving writes the same values back */
@@ -482,12 +660,15 @@ static void test_project(void) {
     CHECK(cw_project_load(&q, path, error, sizeof(error)), "reload: %s", error);
     CHECK(q.window_width == 1920 && q.window_height == 600 && strcmp(q.title, "Demo Game") == 0 && strcmp(q.render, p.render) == 0
           && strcmp(q.module, p.module) == 0 && strcmp(q.main_scene, p.main_scene) == 0 && q.source_count == 2 && strcmp(q.sources[1], p.sources[1]) == 0
-          && q.ui.width == 1920 && q.ui.mode == CW_UI_SCALE_SHRINK,
+          && q.ui.width == 1920 && q.ui.mode == CW_UI_SCALE_SHRINK && q.renderer == CW_RENDERER_3D,
           "saved project round trip");
     f = fopen(path, "w");
     if (f) { fputs("cwproject 1\nname d\nmodule m\n", f); fclose(f); }
     CHECK(cw_project_load(&q, path, error, sizeof(error)) && q.window_width == 1280 && q.window_height == 800 && strcmp(q.title, "d") == 0 && strstr(q.render, "render.cfg")
-          && q.ui.width == 1280 && q.ui.height == 720 && q.ui.mode == CW_UI_SCALE_EXPAND, "defaults: window 1280x800, title = name, render.cfg, a 1280x720 expanding interface");
+          && q.ui.width == 1280 && q.ui.height == 720 && q.ui.mode == CW_UI_SCALE_EXPAND && q.renderer == CW_RENDERER_2D, "defaults: window 1280x800, title = name, render.cfg, a 1280x720 expanding interface, 2d");
+    f = fopen(path, "w");
+    if (f) { fputs("cwproject 1\nname d\nmodule m\nrenderer 4d\n", f); fclose(f); }
+    CHECK(!cw_project_load(&q, path, error, sizeof(error)) && strstr(error, "renderer"), "an unknown renderer is rejected: %s", error);
     f = fopen(path, "w");
     if (f) { fputs("cwproject 1\nname d\nmodule m\nui 800 600 sideways\n", f); fclose(f); }
     CHECK(!cw_project_load(&q, path, error, sizeof(error)) && strstr(error, "ui"), "an unknown scale mode is rejected: %s", error);
@@ -508,6 +689,7 @@ static void test_project(void) {
 
 static void test_assets(void) {
     CHECK(cw_asset_id(NULL) == 0 && cw_asset_id("") == 0 && cw_asset_id("hero.png") != 0 && cw_asset_id("hero.png") == cw_asset_id("hero.png") && cw_asset_id("a") != cw_asset_id("b"), "ids are a pure hash");
+    CHECK(cw_asset_type_for_field("mat_top") == CW_ASSET_MATERIAL, "brush face materials");
     CHECK(cw_asset_type_for_field("material") == CW_ASSET_MATERIAL && cw_asset_type_for_field("sprite") == CW_ASSET_IMAGE && cw_asset_type_for_field("hit_sound") == CW_ASSET_AUDIO
           && cw_asset_type_for_field("idle_clip") == CW_ASSET_ANIMATION && cw_asset_type_for_field("shader") == CW_ASSET_SHADER && cw_asset_type_for_field("next_level") == CW_ASSET_SCENE
           && cw_asset_type_for_field("materials_count") == CW_ASSET_OTHER && cw_asset_type_for_field("thing") == CW_ASSET_OTHER && cw_asset_type_for_field(NULL) == CW_ASSET_OTHER, "asset kind from a field's name");
@@ -895,6 +1077,296 @@ static void test_ui(void) {
     cw_game_close(&game);
 }
 
+/* byte-array fields and the brush geometry behind the level editor */
+typedef struct { int32_t n; CW_BYTES(8) bytes; } Blobbed;
+static const cw_field blobbed_fields[] = { CW_FIELD(Blobbed, n, CW_FIELD_I32), CW_FIELD_BLOB(Blobbed, bytes) };
+static const cw_type_info blobbed_type = {"Blobbed", sizeof(Blobbed), _Alignof(Blobbed), blobbed_fields, 2, NULL, NULL, 0, NULL, NULL};
+static void test_bytes_and_brushes(void) {
+    /* base64 */
+    char text[64];
+    uint8_t back[16];
+    const uint8_t sample[5] = {0, 255, 1, 2, 3};
+    CHECK(cw_base64_encode(sample, 5, text, sizeof(text)) == 8 && strcmp(text, "AP8BAgM=") == 0, "base64 encodes with padding: %s", text);
+    CHECK(cw_base64_decode(text, back, sizeof(back)) == 5 && memcmp(back, sample, 5) == 0, "and decodes");
+    CHECK(cw_base64_encode(sample, 3, text, sizeof(text)) == 4 && cw_base64_decode(text, back, 16) == 3 && cw_base64_encode(sample, 0, text, sizeof(text)) == 0 && text[0] == 0 && cw_base64_decode("", back, 16) == 0, "lengths 3 and 0");
+    CHECK(cw_base64_decode("AP8B*gM=", back, 16) == SIZE_MAX && cw_base64_decode("AP8", back, 16) == SIZE_MAX && cw_base64_decode("AP8BAgM=", back, 2) == SIZE_MAX, "bad characters, lengths and overflow are rejected");
+    CHECK(cw_base64_decode("A=BB", back, 16) == SIZE_MAX, "padding only at the end");
+    /* a blob field through the generic paths */
+    CHECK(cw_type_valid(&blobbed_type) && blobbed_fields[1].capacity == 8, "a CW_BYTES(8) member is a valid field");
+    Blobbed v = {7, {0, {0}}};
+    CHECK(cw_field_format(&blobbed_fields[1], &v, text, sizeof(text)) == 0 && text[0] == 0, "an empty blob formats to nothing");
+    CHECK(cw_field_parse(&blobbed_fields[1], &v, "AP8BAgM=") && v.bytes.size == 5 && v.bytes.data[1] == 255 && v.bytes.data[4] == 3 && cw_field_get(&blobbed_fields[1], &v) == 5, "parse fills size and data");
+    CHECK(cw_field_format(&blobbed_fields[1], &v, text, sizeof(text)) == 8 && strcmp(text, "AP8BAgM=") == 0, "and formats back");
+    CHECK(!cw_field_parse(&blobbed_fields[1], &v, "AAAAAAAAAAAAAAAA") && v.bytes.size == 5, "more than the capacity is refused and leaves the value");
+    CHECK(cw_field_check(&blobbed_fields[1], &v), "a blob within its capacity checks out");
+    v.bytes.size = 9;
+    CHECK(!cw_field_check(&blobbed_fields[1], &v), "a size beyond the capacity does not");
+    v.bytes.size = 5;
+    /* the codec: size and bytes, validated */
+    cw_world w;
+    cw_world_init(&w, NULL);
+    cw_comp_block(&w, 1);
+    CHECK(cw_reflect_register(&w, 0, &blobbed_type), "register");
+    cw_entity_id e = cw_world_create_entity(&w);
+    cw_comp_set(&w, e, 0, &v, sizeof(v));
+    unsigned char image[64];
+    size_t size = 0;
+    CHECK(cw_reflect_marshal(&w, e, 0, image, sizeof(image), &size) && size == 4 + 2 + 5, "marshalled: i32, u16 size, 5 bytes (%zu)", size);
+    Blobbed zero = {0, {0, {0}}};
+    cw_comp_set(&w, e, 0, &zero, sizeof(zero));
+    CHECK(cw_reflect_unmarshal(&w, e, 0, image, size) && ((Blobbed *)cw_comp_ptr(&w, e, 0))->bytes.size == 5 && ((Blobbed *)cw_comp_ptr(&w, e, 0))->bytes.data[1] == 255, "unmarshalled");
+    image[4] = 9;   /* size 9 > capacity 8 */
+    CHECK(!cw_reflect_unmarshal(&w, e, 0, image, size), "an oversized blob image is rejected");
+    cw_world_destroy(&w);
+
+    /* brush geometry */
+    cw_brush b;
+    cw_type_default(&cw_brush_type, &b);
+    b.width = 2; b.height = 4; b.depth = 6; b.subdivisions = 1; b.texture_scale = 2;
+    float center[3] = {10, 20, 30}, lo[3], hi[3];
+    cw_brush_bounds(&b, center, lo, hi);
+    CHECK(lo[0] == 9 && hi[0] == 11 && lo[1] == 18 && hi[1] == 22 && lo[2] == 27 && hi[2] == 33, "bounds around the centre");
+    float nlo[3] = {0, 0, 0}, nhi[3] = {1, 0.001f, 3};
+    cw_brush_set_bounds(&b, center, nlo, nhi, 0.5f);
+    CHECK(b.width == 1 && b.height == 0.5f && b.depth == 3 && center[0] == 0.5f && center[1] == 0.25f && center[2] == 1.5f, "set from corners with a minimum thickness");
+    float n[3];
+    cw_brush_face_normal(CW_FACE_BOTTOM, n);
+    CHECK(n[1] == -1 && cw_brush_face_axis(CW_FACE_SOUTH) == 2 && cw_brush_face_sign(CW_FACE_NORTH) == -1 && strcmp(cw_brush_face_names[CW_FACE_TOP], "top") == 0, "face normals and names");
+    CHECK(cw_brush_face_count(&b) == 6 && cw_brush_clip_count(&b) == 0, "a box has six faces");
+    b.width = 2; b.height = 4; b.depth = 6; b.subdivisions = 2; b.texture_scale = 2;
+    center[0] = 10; center[1] = 20; center[2] = 30;
+    cw_brush_bounds(&b, center, lo, hi);
+    cw_plane plane;
+    CHECK(cw_brush_face_plane(&b, center, CW_FACE_TOP, &plane) && plane.n[1] == 1 && plane.d == 22, "the top plane is y = 22");
+    CHECK(cw_brush_face_plane(&b, center, CW_FACE_WEST, &plane) && plane.n[0] == -1 && plane.d == -9, "the west plane is x = 9 (n . p <= d with n = -x)");
+    cw_brush_polygon poly;
+    CHECK(cw_brush_face_polygon(&b, center, CW_FACE_TOP, &poly) && poly.count == 4, "a box face is a quad (%d vertices)", poly.count);
+    bool quad_ok = poly.count == 4;
+    for (int i = 0; i < poly.count; ++i) if (poly.p[i][1] != 22 || fabsf(poly.p[i][0] - 10) != 1 || fabsf(poly.p[i][2] - 30) != 3) quad_ok = false;
+    CHECK(quad_ok, "with the box's corners");
+    static cw_brush_vertex verts[CW_BRUSH_FACE_MAX_VERTICES];
+    static uint32_t idx[CW_BRUSH_FACE_MAX_INDICES];
+    bool outward = true, on_face = true, uv_ok = true;
+    for (int f = 0; f < CW_BRUSH_FACES; ++f) {
+        size_t ni = 0, nv = cw_brush_face_mesh(&b, center, f, verts, idx, &ni);
+        CHECK(nv == 16 && ni == 24, "a 2x2 face has four cells of four vertices (%zu) and eight triangles (%zu)", nv, ni);
+        cw_brush_face_normal((cw_brush_face)f, n);
+        int axis = cw_brush_face_axis((cw_brush_face)f);
+        for (size_t i = 0; i < nv; ++i) {
+            float p[3] = {verts[i].x, verts[i].y, verts[i].z};
+            if (fabsf(p[axis] - (n[axis] > 0 ? hi[axis] : lo[axis])) > 1e-4f) on_face = false;
+            if (verts[i].nx != n[0] || verts[i].ny != n[1] || verts[i].nz != n[2] || verts[i].a != 255 || verts[i].r != 255) on_face = false;
+            int ua, va;
+            cw_brush_face_tangents((cw_brush_face)f, &ua, &va);
+            if (fabsf(verts[i].u - p[ua] / 2) > 1e-4f || fabsf(verts[i].v + p[va] / 2) > 1e-4f) uv_ok = false;
+        }
+        for (size_t t = 0; t + 2 < ni; t += 3) {
+            const cw_brush_vertex *a = &verts[idx[t]], *bb = &verts[idx[t + 1]], *c = &verts[idx[t + 2]];
+            float e1[3] = {bb->x - a->x, bb->y - a->y, bb->z - a->z}, e2[3] = {c->x - a->x, c->y - a->y, c->z - a->z};
+            float cr[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+            if (cr[0] * n[0] + cr[1] * n[1] + cr[2] * n[2] <= 0) outward = false;
+        }
+    }
+    CHECK(on_face && uv_ok && outward, "every face lies on its plane with its normal, world-aligned uvs (scale 2) and outward triangles");
+    /* texture alignment per face */
+    cw_brush_align al;
+    cw_brush_face_align_get(&b, CW_FACE_TOP, &al);
+    CHECK(al.shift_u == 0 && al.rotation == 0 && al.scale_u == 1 && b.align.size == 0, "alignment defaults, stored nowhere");
+    al.shift_u = 0.5f; al.scale_v = 2; al.rotation = 90;
+    cw_brush_face_align_set(&b, CW_FACE_TOP, &al);
+    cw_brush_face_align_get(&b, CW_FACE_TOP, &al);
+    CHECK((size_t)b.align.size == CW_BRUSH_MAX_FACES * CW_BRUSH_ALIGN_FLOATS * sizeof(float) && al.shift_u == 0.5f && al.scale_v == 2 && al.rotation == 90, "alignment stored and read back");
+    cw_brush_face_align_get(&b, CW_FACE_EAST, &al);
+    CHECK(al.shift_u == 0 && al.scale_v == 1, "other faces keep the defaults");
+    {
+        float tu, tv, top_n[3] = {0, 1, 0}, tpt[3] = {4, 22, 6};   /* top face: u = x, v = z -> base uv (2, -3) at scale 2 */
+        cw_brush_face_uv(&b, CW_FACE_TOP, top_n, tpt, &tu, &tv);
+        /* rotated 90 degrees: (u, v) -> (-v, u) = (3, 2); v scaled by 2 -> 1; shift u by 0.5 -> 3.5 */
+        CHECK(fabsf(tu - 3.5f) < 1e-4f && fabsf(tv - 1) < 1e-4f, "uv follows shift, rotation and scale (%g %g)", (double)tu, (double)tv);
+    }
+    al = cw_brush_align_default();
+    cw_brush_face_align_set(&b, CW_FACE_TOP, &al);
+    CHECK(b.align.size == 0, "back to defaults frees the alignment");
+    /* ray casts report the face */
+    float o[3] = {10, 50, 30}, d[3] = {0, -1, 0}, t;
+    int face;
+    cw_brush_face bface;
+    CHECK(cw_brush_ray(&b, center, o, d, &t, &face) && t == 28 && face == CW_FACE_TOP, "a ray from above hits the top at the right distance (%g)", (double)t);
+    CHECK(cw_brush_ray_box(lo, hi, o, d, &t, &bface) && t == 28 && bface == CW_FACE_TOP, "the box-only cast agrees");
+    float o2[3] = {0, 20, 30}, d2[3] = {1, 0, 0};
+    CHECK(cw_brush_ray(&b, center, o2, d2, &t, &face) && t == 9 && face == CW_FACE_WEST, "from the west");
+    float o3[3] = {10, 20, 30};
+    CHECK(cw_brush_ray(&b, center, o3, d2, &t, &face) && t == 1 && face == CW_FACE_EAST, "from inside: the exit face");
+    float o4[3] = {0, 50, 30};
+    CHECK(!cw_brush_ray(&b, center, o4, d2, &t, &face), "a miss");
+    float pt[3] = {10.9f, 21.9f, 33};
+    CHECK(cw_brush_face_at(lo, hi, pt) == CW_FACE_SOUTH && cw_brush_face_of_point(&b, center, pt) == CW_FACE_SOUTH, "the face a surface point lies on");
+    /* painting: soft, clamped, and invalidated by a subdivision change */
+    float p0[3] = {11, 22, 33};
+    size_t touched = cw_brush_paint_at(&b, center, p0, 3, 0, 0, 255, 0.5f);
+    CHECK(touched >= 3 && cw_brush_painted(&b), "the corner vertices of three faces were touched (%zu)", touched);
+    uint8_t rgb[3];
+    cw_brush_paint_get(&b, CW_FACE_EAST, 2, 2, rgb);   /* east face: u = z, v = y -> (i, j) = (2, 2) is the (+z, +y) corner */
+    CHECK(rgb[0] == 128 && rgb[2] == 255, "half strength at the centre of the stroke (%u %u %u)", rgb[0], rgb[1], rgb[2]);
+    cw_brush_paint_at(&b, center, p0, 3, 0, 0, 255, 1);
+    cw_brush_paint_get(&b, CW_FACE_EAST, 2, 2, rgb);
+    CHECK(rgb[0] == 0 && rgb[1] == 0 && rgb[2] == 255, "full strength reaches the colour");
+    {
+        size_t ni = 0, nv = cw_brush_face_mesh(&b, center, CW_FACE_EAST, verts, idx, &ni);
+        bool blue_corner = false;
+        for (size_t i = 0; i < nv; ++i) if (fabsf(verts[i].y - 22) < 1e-4f && fabsf(verts[i].z - 33) < 1e-4f && verts[i].b == 255 && verts[i].r == 0) blue_corner = true;
+        CHECK(blue_corner, "the mesh carries the painted corner colour");
+    }
+    float far_point[3] = {-100, 0, 0};
+    CHECK(cw_brush_paint_at(&b, center, far_point, 1, 255, 0, 0, 1) == 0, "a stroke away from the brush touches nothing");
+    b.subdivisions = 4;
+    {
+        size_t ni = 0;
+        CHECK(!cw_brush_painted(&b) && cw_brush_face_mesh(&b, center, CW_FACE_TOP, verts, idx, &ni) == 64 && ni == 96, "a subdivision change invalidates the paint; the lattice follows");
+    }
+    cw_brush_paint_get(&b, CW_FACE_TOP, 0, 0, rgb);
+    CHECK(rgb[2] == 255 && rgb[0] == 255, "unpainted reads white");
+
+    /* clipping: a wedge, a general cut, an axis-aligned cut (a resize), misses */
+    cw_type_default(&cw_brush_type, &b);
+    b.width = 4; b.height = 2; b.depth = 2;
+    center[0] = 0; center[1] = 1; center[2] = 0;
+    CHECK(cw_brush_make_wedge(&b, center, 0, 1) && cw_brush_clip_count(&b) == 1 && cw_brush_face_count(&b) == 7, "a wedge is a box with one clip");
+    CHECK(b.width == 4 && b.height == 2 && fabsf(center[1] - 1) < 1e-5f, "the wedge still spans the box");
+    {
+        float o_top[3] = {1.9f, 5, 0}, o_near[3] = {-1.9f, 5, 0}, down[3] = {0, -1, 0};
+        /* rising along +x: the far (+x) end is tall, the near end is cut to nothing */
+        CHECK(cw_brush_ray(&b, center, o_top, down, &t, &face) && face == CW_BRUSH_FACES && fabsf(t - 3.05f) < 0.01f, "near the far end the slope is almost at the top (t %g, face %d)", (double)t, face);
+        cw_brush_polygon east, top_face;
+        cw_brush_face_polygon(&b, center, CW_FACE_EAST, &east);
+        cw_brush_face_polygon(&b, center, CW_FACE_TOP, &top_face);
+        CHECK(east.count == 4 && top_face.count == 0, "the far end is a full wall, the top is gone (%d, %d)", east.count, top_face.count);
+        CHECK(cw_brush_ray(&b, center, o_near, down, &t, &face) && face == CW_BRUSH_FACES && t > 3 && t < 5, "the near end is the slope (t %g, face %d)", (double)t, face);
+        cw_brush_polygon slope, west;
+        cw_brush_face_polygon(&b, center, CW_BRUSH_FACES, &slope);
+        cw_brush_face_polygon(&b, center, CW_FACE_WEST, &west);
+        CHECK(slope.count == 4 && west.count == 0, "the slope is a quad and the west face is gone (%d, %d)", slope.count, west.count);
+        size_t ni = 0, nv = cw_brush_face_mesh(&b, center, CW_FACE_SOUTH, verts, idx, &ni);
+        CHECK(nv > 0 && ni > 0, "the south face is now a triangle, still meshed (%zu vertices)", nv);
+        bool inside = true;
+        for (size_t i = 0; i < nv; ++i) if (verts[i].y > (verts[i].x + 2) * 0.5f + 1e-3f) inside = false;   /* under the diagonal y = (x + 2) / 2 */
+        CHECK(inside, "no vertex of the clipped face pokes above the slope");
+    }
+    cw_brush_paint_get(&b, CW_BRUSH_FACES, 0, 0, rgb);
+    CHECK(rgb[0] == 255 && cw_brush_paint_size(&b) == (size_t)7 * 9 * 3, "clip faces have a lattice too");
+    cw_plane miss = {{0, 1, 0}, 10};
+    CHECK(cw_brush_plane_side(&b, center, &miss) == -1 && !cw_brush_clip(&b, center, &miss), "a plane above the brush cuts nothing");
+    cw_plane gone = {{0, -1, 0}, -10};
+    CHECK(cw_brush_plane_side(&b, center, &gone) == 1 && !cw_brush_clip(&b, center, &gone), "a plane that would remove everything is refused");
+    cw_plane half = {{0, 1, 0}, 1};
+    CHECK(cw_brush_plane_side(&b, center, &half) == 0 && cw_brush_clip(&b, center, &half) && cw_brush_clip_count(&b) == 1 && fabsf(b.height - 1) < 1e-5f && fabsf(center[1] - 0.5f) < 1e-5f,
+          "an axis-aligned cut resizes the box instead of adding a plane (height %g, centre y %g)", (double)b.height, (double)center[1]);
+    CHECK(fabsf(b.width - 4) < 1e-4f, "the wedge's width is unchanged by the horizontal cut");
+    cw_plane diag = {{0.70710678f, 0, 0.70710678f}, 0.70710678f};   /* x + z <= 1 */
+    CHECK(cw_brush_clip(&b, center, &diag) && cw_brush_clip_count(&b) == 2, "a second general cut is stored");
+    {
+        float verts_max = -INFINITY;
+        int faces = cw_brush_face_count(&b);
+        for (int f = 0; f < faces; ++f) {
+            cw_brush_polygon pg;
+            cw_brush_face_polygon(&b, center, f, &pg);
+            for (int i = 0; i < pg.count; ++i) if (pg.p[i][0] + pg.p[i][2] > verts_max) verts_max = pg.p[i][0] + pg.p[i][2];
+        }
+        CHECK(verts_max <= 1 + 1e-3f, "every remaining vertex is on the kept side (max x + z = %g)", (double)verts_max);
+        cw_brush_bounds(&b, center, lo, hi);
+        CHECK(hi[0] <= 2 + 1e-4f && hi[2] < 1 + 1e-3f, "the box shrank to the solid (z max %g)", (double)hi[2]);
+    }
+    cw_brush_clear_clips(&b);
+    CHECK(cw_brush_clip_count(&b) == 0 && cw_brush_face_count(&b) == 6, "clips cleared");
+
+    /* CSG: subtraction and hollowing */
+    {
+        cw_brush big, cutter, pieces[CW_BRUSH_MAX_FACES];
+        float pc[CW_BRUSH_MAX_FACES][3];
+        cw_type_default(&cw_brush_type, &big);
+        big.width = 6; big.height = 2; big.depth = 6;
+        float bc[3] = {0, 1, 0}, cc[3] = {0, 1, 0};
+        cw_type_default(&cw_brush_type, &cutter);
+        cutter.width = 2; cutter.height = 4; cutter.depth = 2;   /* a column through the middle, taller than the slab */
+        cw_plane cut[CW_BRUSH_MAX_FACES];
+        int nc = cw_brush_planes(&cutter, cc, cut);
+        CHECK(nc == 6 && cw_brush_intersects(&big, bc, cut, nc), "the column meets the slab");
+        int dropped = 7;
+        int np = cw_brush_subtract(&big, bc, cut, nc, pieces, pc, &dropped);
+        CHECK(np == 4 && dropped == 0, "a box minus a box through it: four pieces (%d)", np);
+        float volume = 0;
+        bool boxes = true;
+        for (int i = 0; i < np; ++i) {
+            volume += pieces[i].width * pieces[i].height * pieces[i].depth;
+            if (cw_brush_clip_count(&pieces[i])) boxes = false;
+        }
+        CHECK(boxes && fabsf(volume - (36 * 2 - 4 * 2)) < 1e-3f, "the pieces are plain boxes and the hole's volume is gone (%g)", (double)volume);
+        cw_brush far_cutter = cutter;
+        float fc[3] = {20, 1, 0};
+        nc = cw_brush_planes(&far_cutter, fc, cut);
+        CHECK(!cw_brush_intersects(&big, bc, cut, nc) && cw_brush_subtract(&big, bc, cut, nc, pieces, pc, NULL) == -1, "a cutter elsewhere does not intersect");
+        cw_brush huge = cutter;
+        huge.width = huge.depth = 20; huge.height = 20;
+        nc = cw_brush_planes(&huge, cc, cut);
+        CHECK(cw_brush_subtract(&big, bc, cut, nc, pieces, pc, NULL) == 0, "swallowed whole: no pieces");
+        np = cw_brush_hollow(&big, bc, 0.5f, pieces, pc, &dropped);
+        CHECK(np == 6 && dropped == 0, "a hollowed box has six walls (%d)", np);
+        volume = 0;
+        for (int i = 0; i < np; ++i) volume += pieces[i].width * pieces[i].height * pieces[i].depth;
+        CHECK(fabsf(volume - (6 * 2 * 6 - 5 * 1 * 5)) < 1e-3f, "the walls enclose the hollow (%g)", (double)volume);
+        /* subtracting a wedge leaves a piece with a clip plane */
+        cw_brush wedge;
+        cw_type_default(&cw_brush_type, &wedge);
+        wedge.width = 4; wedge.height = 2; wedge.depth = 8;
+        float wc[3] = {0, 1, 0};
+        cw_brush_make_wedge(&wedge, wc, 0, 1);
+        nc = cw_brush_planes(&wedge, wc, cut);
+        np = cw_brush_subtract(&big, bc, cut, nc, pieces, pc, &dropped);
+        bool clipped_piece = false;
+        for (int i = 0; i < np; ++i) if (cw_brush_clip_count(&pieces[i])) clipped_piece = true;
+        CHECK(np >= 1 && clipped_piece, "the piece over the wedge's slope carries the slope as a clip (%d pieces)", np);
+    }
+    /* texture lock, grid snapping and vertices */
+    {
+        cw_brush tb;
+        cw_type_default(&cw_brush_type, &tb);
+        tb.width = 2; tb.height = 2; tb.depth = 2; tb.texture_scale = 2;
+        cw_brush_align al0;
+        cw_brush_face_align_get(&tb, CW_FACE_TOP, &al0);
+        float move[3] = {1, 0, 3};
+        cw_brush_lock_textures(&tb, move);
+        cw_brush_align al1;
+        cw_brush_face_align_get(&tb, CW_FACE_TOP, &al1);
+        /* top face: u = x, v = z (negated): base uv moved by (0.5, -1.5), so the shift compensates */
+        CHECK(fabsf(al1.shift_u + 0.5f) < 1e-5f && fabsf(al1.shift_v - 1.5f) < 1e-5f, "texture lock shifts the top face by the move over the texture scale (%g %g)", (double)al1.shift_u, (double)al1.shift_v);
+        cw_brush_face_align_get(&tb, CW_FACE_EAST, &al1);
+        CHECK(fabsf(al1.shift_u + 1.5f) < 1e-5f && fabsf(al1.shift_v) < 1e-5f, "the east face (u = z, v = y) shifts along z only (%g %g)", (double)al1.shift_u, (double)al1.shift_v);
+        float tc[3] = {0.3f, 1.1f, -0.2f};
+        tb.width = 1.9f; tb.height = 2.2f; tb.depth = 1.6f;
+        CHECK(cw_brush_snap_to_grid(&tb, tc, 0.5f) && tb.width == 2 && tb.height == 2 && tb.depth == 1.5f && tc[0] == 0.5f && tc[1] == 1 && tc[2] == -0.25f, "snap to a 0.5 grid: faces land on grid lines (%g %g %g at %g %g %g)",
+              (double)tb.width, (double)tb.height, (double)tb.depth, (double)tc[0], (double)tc[1], (double)tc[2]);
+        CHECK(!cw_brush_snap_to_grid(&tb, tc, 0.5f), "snapping again changes nothing");
+        float corners_out[32][3];
+        CHECK(cw_brush_vertices(&tb, tc, corners_out, 32) == 8, "a box has eight vertices");
+        cw_brush wb;
+        cw_type_default(&cw_brush_type, &wb);
+        wb.width = 4; wb.height = 2; wb.depth = 2;
+        float wc2[3] = {0, 1, 0};
+        cw_brush_make_wedge(&wb, wc2, 0, 1);
+        CHECK(cw_brush_vertices(&wb, wc2, corners_out, 32) == 6, "a wedge has six");
+        /* drag a box corner: the three faces through it follow */
+        float corner[3] = {1.5f, 2, 0.5f}, target[3] = {2, 3, 1};
+        CHECK(cw_brush_move_vertex(&tb, tc, corner, target) && fabsf(tb.width - 2.5f) < 1e-5f && fabsf(tb.height - 3) < 1e-5f && fabsf(tb.depth - 2) < 1e-5f, "the box grew to the moved corner (%g %g %g)", (double)tb.width, (double)tb.height, (double)tb.depth);
+        float nowhere[3] = {9, 9, 9};
+        CHECK(!cw_brush_move_vertex(&tb, tc, nowhere, target), "a point that is no vertex moves nothing");
+        /* drag the wedge's top-far vertex down: the slope re-fits and the top edge lowers */
+        float top_far[3] = {2, 2, 1}, lower[3] = {2, 1, 1};
+        CHECK(cw_brush_move_vertex(&wb, wc2, top_far, lower), "a wedge vertex on the slope moves");
+        cw_plane slope;
+        CHECK(cw_brush_face_plane(&wb, wc2, CW_BRUSH_FACES, &slope) && fabsf(slope.n[0] * 2 + slope.n[1] * 1 + slope.n[2] * 1 - slope.d) < 1e-3f, "the slope passes through the moved vertex");
+        CHECK(fabsf(slope.n[0] * -2 + slope.n[1] * 0 + slope.n[2] * 1 - slope.d) < 1e-3f, "and still through the bottom near edge");
+    }
+}
 static void test_dynamic(const char *library) {
     cw_game game;
     char error[256] = "";
@@ -921,6 +1393,7 @@ int main(int argc, char **argv) {
     test_assets();
     test_animation();
     test_ui();
+    test_bytes_and_brushes();
     test_dynamic(argc > 1 ? argv[1] : NULL);
     if (failures) { printf("%d of %d checks failed\n", failures, checks); return 1; }
     printf("OK: %d game module checks passed\n", checks);

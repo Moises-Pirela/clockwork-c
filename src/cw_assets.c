@@ -80,7 +80,7 @@ static cw_asset_type type_by_name(const char *name) {
 }
 cw_asset_type cw_asset_type_for_field(const char *name) {
     static const struct { const char *word; cw_asset_type type; } words[] = {
-        {"material", CW_ASSET_MATERIAL}, {"sprite", CW_ASSET_IMAGE}, {"image", CW_ASSET_IMAGE}, {"texture", CW_ASSET_IMAGE},
+        {"material", CW_ASSET_MATERIAL}, {"mat", CW_ASSET_MATERIAL}, {"sprite", CW_ASSET_IMAGE}, {"image", CW_ASSET_IMAGE}, {"texture", CW_ASSET_IMAGE},
         {"clip", CW_ASSET_ANIMATION}, {"animation", CW_ASSET_ANIMATION}, {"anim", CW_ASSET_ANIMATION}, {"shader", CW_ASSET_SHADER},
         {"sound", CW_ASSET_AUDIO}, {"audio", CW_ASSET_AUDIO}, {"music", CW_ASSET_AUDIO}, {"font", CW_ASSET_FONT},
         {"prefab", CW_ASSET_PREFAB}, {"scene", CW_ASSET_SCENE}, {"level", CW_ASSET_SCENE},

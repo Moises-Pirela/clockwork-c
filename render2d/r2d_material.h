@@ -22,6 +22,14 @@
  *   p0 1 1 1 0                    the effect's parameters
  *   p1 0 0 0 0
  *   ...
+ *   shading lit                   3D surfaces (render3d): lit (Phong) | unlit (the colour alone)
+ *   specular 0.3 0.3 0.3          the specular highlight colour
+ *   shininess 32                  its tightness (Phong exponent)
+ *   emissive 0 0 0                light the surface gives off by itself
+ *
+ * The surface block is what a 3D renderer draws the material with (the
+ * texture, tint, filter, wrap and tiling above apply too); the effect and
+ * the blend mode are the 2D sprite's.
  *
  * This module is data only (no renderer dependency); r2d_sprite.h draws
  * with it. A custom shader (`*.cwshader`) is a GLSL fragment function
@@ -63,6 +71,11 @@ typedef struct {
     float tint[4];
     float tiling[2], offset[2];
     float params[R2D_MATERIAL_PARAMS][4];
+    /* the 3D surface */
+    bool unlit;
+    float specular[3];
+    float shininess;
+    float emissive[3];
 } r2d_material;
 
 /* One editable parameter of an effect: a component of params[index]. */

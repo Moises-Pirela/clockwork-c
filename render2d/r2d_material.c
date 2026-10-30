@@ -109,6 +109,8 @@ void r2d_material_defaults(r2d_material *m, const char *name) {
     copy_name(m->name, sizeof(m->name), name && *name ? name : "material");
     m->tint[0] = m->tint[1] = m->tint[2] = m->tint[3] = 1;
     m->tiling[0] = m->tiling[1] = 1;
+    m->specular[0] = m->specular[1] = m->specular[2] = 0.3f;
+    m->shininess = 32;
     r2d_material_set_effect(m, R2D_EFFECT_SPRITE);
 }
 bool r2d_material_equal(const r2d_material *a, const r2d_material *b) {
@@ -116,7 +118,9 @@ bool r2d_material_equal(const r2d_material *a, const r2d_material *b) {
     return strcmp(a->name, b->name) == 0 && strcmp(a->texture, b->texture) == 0 && strcmp(a->shader, b->shader) == 0 &&
            a->effect == b->effect && a->blend == b->blend && a->nearest == b->nearest && a->repeat == b->repeat &&
            memcmp(a->tint, b->tint, sizeof(a->tint)) == 0 && memcmp(a->tiling, b->tiling, sizeof(a->tiling)) == 0 &&
-           memcmp(a->offset, b->offset, sizeof(a->offset)) == 0 && memcmp(a->params, b->params, sizeof(a->params)) == 0;
+           memcmp(a->offset, b->offset, sizeof(a->offset)) == 0 && memcmp(a->params, b->params, sizeof(a->params)) == 0 &&
+           a->unlit == b->unlit && memcmp(a->specular, b->specular, sizeof(a->specular)) == 0 && a->shininess == b->shininess &&
+           memcmp(a->emissive, b->emissive, sizeof(a->emissive)) == 0;
 }
 size_t r2d_material_format(const r2d_material *m, char *out, size_t capacity) {
     int n = snprintf(out, capacity,
@@ -128,6 +132,12 @@ size_t r2d_material_format(const r2d_material *m, char *out, size_t capacity) {
     size_t len = n > 0 ? (size_t)n : 0;
     for (int i = 0; i < R2D_MATERIAL_PARAMS && len < capacity; ++i) {
         n = snprintf(out + len, capacity - len, "p%d %g %g %g %g\n", i, (double)m->params[i][0], (double)m->params[i][1], (double)m->params[i][2], (double)m->params[i][3]);
+        if (n > 0) len += (size_t)n;
+    }
+    if (len < capacity) {
+        n = snprintf(out + len, capacity - len, "shading %s\nspecular %g %g %g\nshininess %g\nemissive %g %g %g\n", m->unlit ? "unlit" : "lit",
+                     (double)m->specular[0], (double)m->specular[1], (double)m->specular[2], (double)m->shininess,
+                     (double)m->emissive[0], (double)m->emissive[1], (double)m->emissive[2]);
         if (n > 0) len += (size_t)n;
     }
     return len < capacity ? len : capacity - 1;
@@ -184,6 +194,14 @@ bool r2d_material_parse(r2d_material *m, const char *text, size_t size, char *er
         else if (strcmp(s, "tiling") == 0) { if (!floats(value, m->tiling, 2)) return fail(error, error_capacity, line_no, "tiling needs two numbers"); }
         else if (strcmp(s, "offset") == 0) { if (!floats(value, m->offset, 2)) return fail(error, error_capacity, line_no, "offset needs two numbers"); }
         else if (s[0] == 'p' && s[1] >= '0' && s[1] < '0' + R2D_MATERIAL_PARAMS && !s[2]) { if (!floats(value, m->params[s[1] - '0'], 4)) return fail(error, error_capacity, line_no, "a parameter needs four numbers"); }
+        else if (strcmp(s, "shading") == 0) {
+            if (strcmp(value, "lit") == 0) m->unlit = false;
+            else if (strcmp(value, "unlit") == 0) m->unlit = true;
+            else return fail(error, error_capacity, line_no, "shading must be lit or unlit");
+        }
+        else if (strcmp(s, "specular") == 0) { if (!floats(value, m->specular, 3)) return fail(error, error_capacity, line_no, "specular needs three numbers"); }
+        else if (strcmp(s, "shininess") == 0) { if (!floats(value, &m->shininess, 1) || m->shininess < 1) return fail(error, error_capacity, line_no, "shininess needs a number of at least 1"); }
+        else if (strcmp(s, "emissive") == 0) { if (!floats(value, m->emissive, 3)) return fail(error, error_capacity, line_no, "emissive needs three numbers"); }
         else return fail(error, error_capacity, line_no, "unknown key");
     }
     if (!header) return fail(error, error_capacity, 0, "empty file");

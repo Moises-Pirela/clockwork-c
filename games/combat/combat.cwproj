@@ -15,3 +15,5 @@ window 1280 800
 title Clockwork combat
 # the interface's reference resolution and how it scales to the window (expand|shrink|width|height|pixels)
 ui 1280 720 expand
+# how the hosts view the world: 2d (render2d's camera) or 3d (render3d: Shape3D primitives, a perspective view)
+renderer 2d

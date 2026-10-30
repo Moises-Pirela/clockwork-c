@@ -3,6 +3,7 @@
 #endif
 #define _CRT_SECURE_NO_WARNINGS 1
 #include "editor_core.h"
+#include <math.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -251,6 +252,7 @@ void ed_init(ed_document *d, const char *engine_root, const char *player_path) {
     const char *env = getenv("CW_PLAYER");
     copy_str(d->player_path, sizeof(d->player_path), env && *env ? env : (player_path ? player_path : ""));
     d->last_build_status = -1;
+    d->texture_lock = true;
     ed_status(d, false, "open a project (.cwproj) to start");
 }
 static void world_down(ed_document *d) {
@@ -719,7 +721,7 @@ static cw_component_id position_component(const cw_world *w) {
     }
     return CW_INVALID_COMPONENT;
 }
-cw_entity_id ed_create_entity(ed_document *d, float x, float y) {
+cw_entity_id ed_create_entity3(ed_document *d, float x, float y, float z) {
     if (!d->world_ready) return CW_INVALID_ENTITY;
     cw_world *w = &d->gw.world;
     cw_entity_id id = cw_world_create_entity(w);
@@ -730,7 +732,7 @@ cw_entity_id ed_create_entity(ed_document *d, float x, float y) {
         if (t->size <= sizeof(value)) {
             cw_type_default(t, value);
             cw_comp_set(w, id, pc, value, t->size);
-            cw_reflect_set_position(w, id, x, y);
+            cw_reflect_set_position3(w, id, x, y, z);
         }
     }
     cw_game_world_settle(&d->gw);
@@ -740,6 +742,7 @@ cw_entity_id ed_create_entity(ed_document *d, float x, float y) {
               pc == CW_INVALID_COMPONENT ? "" : " with a position");
     return id;
 }
+cw_entity_id ed_create_entity(ed_document *d, float x, float y) { return ed_create_entity3(d, x, y, 0); }
 /* --- the interface --- */
 static const char *const ui_kind_names[ED_UI_KINDS] = {"panel", "image", "text", "button", "bar"};
 const char *ed_ui_kind_name(ed_ui_kind kind) { return kind >= 0 && kind < ED_UI_KINDS ? ui_kind_names[kind] : "?"; }
@@ -1032,7 +1035,8 @@ static cw_entity_id map_duplicate(cw_entity_id ref, void *user) {
         if (m->from[i] == ref) return m->to[i];
     return ref;
 }
-size_t ed_duplicate_selection(ed_document *d, float dx, float dy) {
+size_t ed_duplicate_selection(ed_document *d, float dx, float dy) { return ed_duplicate_selection3(d, dx, dy, 0); }
+size_t ed_duplicate_selection3(ed_document *d, float dx, float dy, float dz) {
     if (!d->world_ready || !d->selection_count) { ed_status(d, false, "nothing selected"); return 0; }
     cw_world *w = &d->gw.world;
     size_t n = d->selection_count;
@@ -1044,8 +1048,8 @@ size_t ed_duplicate_selection(ed_document *d, float dx, float dy) {
         if (!cw_world_is_valid(w, from[i])) { to[i] = CW_INVALID_ENTITY; continue; }
         to[i] = cw_world_create_entity(w);
         cw_reflect_copy_entity(w, from[i], to[i]);
-        float x, y;
-        if (cw_reflect_position(w, to[i], &x, &y)) cw_reflect_set_position(w, to[i], x + dx, y + dy);
+        float x, y, z;
+        if (cw_reflect_position3(w, to[i], &x, &y, &z)) cw_reflect_set_position3(w, to[i], x + dx, y + dy, z + dz);
         const char *name = ed_name_of(d, from[i]);
         if (*name) {
             char copy[CW_SCENE_NAME_CAPACITY];
@@ -1076,6 +1080,373 @@ size_t ed_move_selection(ed_document *d, float dx, float dy) {
         if (!cw_reflect_position(&d->gw.world, d->selection[i], &x, &y)) continue;
         if (cw_reflect_set_position(&d->gw.world, d->selection[i], x + dx, y + dy)) ++n;
     }
+    return n;
+}
+size_t ed_move_selection3(ed_document *d, float dx, float dy, float dz) {
+    if (!d->world_ready) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < d->selection_count; ++i) {
+        float x, y, z;
+        if (!cw_reflect_position3(&d->gw.world, d->selection[i], &x, &y, &z)) continue;
+        if (cw_reflect_set_position3(&d->gw.world, d->selection[i], x + dx, y + dy, z + dz)) ++n;
+        if (d->texture_lock && d->gw.brush_ct != CW_INVALID_COMPONENT && cw_comp_has(&d->gw.world, d->selection[i], d->gw.brush_ct)) {
+            float delta[3] = {dx, dy, dz};
+            cw_brush_lock_textures(cw_comp_ptr(&d->gw.world, d->selection[i], d->gw.brush_ct), delta);
+            cw_comp_touch(&d->gw.world, d->selection[i], d->gw.brush_ct);
+        }
+    }
+    return n;
+}
+bool ed_is_3d(const ed_document *d) { return d && d->project_open && d->project.renderer == CW_RENDERER_3D; }
+bool ed_set_renderer(ed_document *d, cw_renderer_kind kind) {
+    if (!d->project_open) { ed_status(d, true, "no project is open"); return false; }
+    if (d->project.renderer == kind) return true;
+    d->project.renderer = kind;
+    char error[256];
+    if (!cw_project_save(&d->project, error, sizeof(error))) { ed_status(d, true, "%s", error); return false; }
+    ed_status(d, false, "project saved: viewed in %s", cw_renderer_name(kind));
+    return true;
+}
+bool ed_is_decal(const ed_document *d, cw_entity_id id) {
+    return d && d->world_ready && d->gw.decal3d_ct != CW_INVALID_COMPONENT && cw_comp_has(&d->gw.world, id, d->gw.decal3d_ct);
+}
+cw_entity_id ed_create_decal(ed_document *d, const float point[3], const float normal[3], float size, float depth, uint32_t material) {
+    if (!d->world_ready) return CW_INVALID_ENTITY;
+    cw_world *w = &d->gw.world;
+    cw_component_id pc = position_component(w);
+    if (pc == CW_INVALID_COMPONENT || d->gw.decal3d_ct == CW_INVALID_COMPONENT) { ed_status(d, true, "decals need a position component with x, y and z"); return CW_INVALID_ENTITY; }
+    cw_entity_id id = cw_world_create_entity(w);
+    const cw_type_info *t = cw_comp_type(w, pc);
+    unsigned char value[1024];
+    if (t->size <= sizeof(value)) {
+        cw_type_default(t, value);
+        cw_comp_set(w, id, pc, value, t->size);
+    }
+    cw_decal3d decal;
+    cw_type_default(&cw_decal3d_type, &decal);
+    decal.width = decal.height = size > 0.01f ? size : 0.01f;
+    decal.depth = depth > 0.01f ? depth : 0.01f;
+    decal.material = material;
+    if (normal) {
+        /* the decal's local y must point along the normal: pitch it off the ground, then yaw it around */
+        float nx = normal[0], ny = normal[1], nz = normal[2], len = sqrtf(nx * nx + ny * ny + nz * nz);
+        if (len > 1e-6f) {
+            nx /= len; ny /= len; nz /= len;
+            float h = sqrtf(nx * nx + nz * nz);
+            if (h > 1e-4f) {
+                /* Euler roll -> pitch -> yaw: pitch rx turns +y towards +z (rx = 90 deg: +y -> +z), yaw ry turns +z towards +x */
+                decal.rx = atan2f(h, ny);
+                decal.ry = atan2f(nx, nz);
+            } else if (ny < 0) decal.rx = 3.1415927f;   /* a ceiling */
+        }
+    }
+    cw_comp_set(w, id, d->gw.decal3d_ct, &decal, sizeof(decal));
+    cw_reflect_set_position3(w, id, point[0], point[1], point[2]);
+    cw_game_world_settle(&d->gw);
+    ed_select_set(d, id);
+    ed_commit(d, "create decal");
+    ed_status(d, false, "decal #%" PRId64 " at %.1f, %.1f, %.1f", id, (double)point[0], (double)point[1], (double)point[2]);
+    return id;
+}
+size_t ed_rotate_selection(ed_document *d, float drx, float dry, float drz) {
+    if (!d->world_ready) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < d->selection_count; ++i) {
+        float rx, ry, rz;
+        if (!cw_reflect_rotation3(&d->gw.world, d->selection[i], &rx, &ry, &rz)) continue;
+        if (cw_reflect_set_rotation3(&d->gw.world, d->selection[i], rx + drx, ry + dry, rz + drz)) ++n;
+    }
+    return n;
+}
+size_t ed_scale_selection(ed_document *d, float fx, float fy, float fz) {
+    if (!d->world_ready) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < d->selection_count; ++i) {
+        float sx, sy, sz;
+        if (!cw_reflect_size3(&d->gw.world, d->selection[i], &sx, &sy, &sz)) continue;
+        sx *= fx; sy *= fy; sz *= fz;
+        if (cw_reflect_set_size3(&d->gw.world, d->selection[i], sx < 0.01f ? 0.01f : sx, sy < 0.01f ? 0.01f : sy, sz < 0.01f ? 0.01f : sz)) ++n;
+    }
+    return n;
+}
+
+/* --- brushes --- */
+static cw_brush *brush_of(ed_document *d, cw_entity_id id) {
+    if (!d->world_ready || d->gw.brush_ct == CW_INVALID_COMPONENT || !cw_world_is_valid(&d->gw.world, id) || !cw_comp_has(&d->gw.world, id, d->gw.brush_ct)) return NULL;
+    return cw_comp_ptr(&d->gw.world, id, d->gw.brush_ct);
+}
+bool ed_is_brush(const ed_document *d, cw_entity_id id) { return brush_of((ed_document *)d, id) != NULL; }
+bool ed_brush_bounds(ed_document *d, cw_entity_id id, float lo[3], float hi[3]) {
+    const cw_brush *b = brush_of(d, id);
+    float c[3];
+    if (!b || !cw_reflect_position3(&d->gw.world, id, &c[0], &c[1], &c[2])) return false;
+    cw_brush_bounds(b, c, lo, hi);
+    return true;
+}
+static cw_entity_id create_brush(ed_document *d, const float lo[3], const float hi[3], uint32_t material, int wedge_axis, float wedge_sign);
+cw_entity_id ed_create_brush(ed_document *d, const float lo[3], const float hi[3], uint32_t material) { return create_brush(d, lo, hi, material, -1, 0); }
+cw_entity_id ed_create_wedge(ed_document *d, const float lo[3], const float hi[3], uint32_t material, int axis, float sign) { return create_brush(d, lo, hi, material, axis, sign); }
+static cw_entity_id create_brush(ed_document *d, const float lo[3], const float hi[3], uint32_t material, int wedge_axis, float wedge_sign) {
+    if (!d->world_ready) return CW_INVALID_ENTITY;
+    cw_world *w = &d->gw.world;
+    cw_component_id pc = position_component(w);
+    if (pc == CW_INVALID_COMPONENT || d->gw.brush_ct == CW_INVALID_COMPONENT) { ed_status(d, true, "brushes need a position component with x, y and z"); return CW_INVALID_ENTITY; }
+    cw_entity_id id = cw_world_create_entity(w);
+    const cw_type_info *t = cw_comp_type(w, pc);
+    unsigned char value[1024];
+    if (t->size <= sizeof(value)) {
+        cw_type_default(t, value);
+        cw_comp_set(w, id, pc, value, t->size);
+    }
+    cw_brush brush;
+    cw_type_default(&cw_brush_type, &brush);
+    float center[3];
+    cw_brush_set_bounds(&brush, center, lo, hi, 0.01f);
+    for (int f = 0; f < CW_BRUSH_MAX_FACES; ++f) brush.material[f] = material;
+    bool wedge = wedge_axis >= 0 && cw_brush_make_wedge(&brush, center, wedge_axis, wedge_sign);
+    cw_comp_set(w, id, d->gw.brush_ct, &brush, sizeof(brush));
+    cw_reflect_set_position3(w, id, center[0], center[1], center[2]);
+    cw_game_world_settle(&d->gw);
+    ed_select_set(d, id);
+    ed_commit(d, wedge ? "create wedge" : "create brush");
+    ed_status(d, false, "%s #%" PRId64 ": %.2g x %.2g x %.2g at %.1f, %.1f, %.1f", wedge ? "wedge" : "brush", id, (double)brush.width, (double)brush.height, (double)brush.depth,
+              (double)center[0], (double)center[1], (double)center[2]);
+    return id;
+}
+size_t ed_clip_selection(ed_document *d, const float n[3], float dist, ed_clip_mode mode) {
+    if (!d->world_ready) return 0;
+    cw_world *w = &d->gw.world;
+    cw_plane back = {{n[0], n[1], n[2]}, dist}, front = {{-n[0], -n[1], -n[2]}, -dist};   /* the solid keeps n . p <= d */
+    size_t cut = 0, created = 0, removed = 0;
+    size_t count = d->selection_count;
+    cw_entity_id *targets = malloc(count * sizeof(*targets));
+    if (!targets) return 0;
+    memcpy(targets, d->selection, count * sizeof(*targets));
+    for (size_t i = 0; i < count; ++i) {
+        cw_entity_id id = targets[i];
+        cw_brush *b = brush_of(d, id);
+        float c[3];
+        if (!b || !cw_reflect_position3(w, id, &c[0], &c[1], &c[2])) continue;
+        if (cw_brush_plane_side(b, c, &back) != 0) continue;   /* the plane misses this brush */
+        if (mode == ED_CLIP_KEEP_BOTH) {
+            cw_entity_id copy = cw_world_create_entity(w);
+            cw_reflect_copy_entity(w, id, copy);
+            const char *name = ed_name_of(d, id);
+            if (*name) {
+                char text[CW_SCENE_NAME_CAPACITY];
+                snprintf(text, sizeof(text), "%.*s cut", (int)(sizeof(text) - 5), name);
+                set_name(d, copy, text);
+            }
+            cw_brush *cb = brush_of(d, copy);
+            float cc[3] = {c[0], c[1], c[2]};
+            if (cb && cw_brush_clip(cb, cc, &front)) { cw_reflect_set_position3(w, copy, cc[0], cc[1], cc[2]); ++created; ed_select_add(d, copy); }
+            else { cw_world_mark_destroy(w, copy); }
+        }
+        if (cw_brush_clip(b, c, mode == ED_CLIP_KEEP_FRONT ? &front : &back)) {
+            cw_comp_touch(w, id, d->gw.brush_ct);
+            cw_reflect_set_position3(w, id, c[0], c[1], c[2]);
+            ++cut;
+        } else ++removed;
+    }
+    free(targets);
+    cw_game_world_settle(&d->gw);
+    if (cut || created) {
+        ed_commit(d, "clip");
+        ed_status(d, false, "clipped %zu brush%s%s", cut, cut == 1 ? "" : "es", created ? " (both sides kept)" : "");
+    } else if (removed) ed_status(d, true, "the cut would leave nothing, or the brush already has %d clips", CW_BRUSH_MAX_CLIPS);
+    else ed_status(d, true, "the plane misses the selected brushes");
+    return cut + created;
+}
+/* A new entity carrying `like`'s components and name, with this brush at this centre. */
+static cw_entity_id spawn_piece(ed_document *d, cw_entity_id like, const cw_brush *piece, const float center[3], const char *suffix) {
+    cw_world *w = &d->gw.world;
+    cw_entity_id id = cw_world_create_entity(w);
+    cw_reflect_copy_entity(w, like, id);
+    cw_comp_set(w, id, d->gw.brush_ct, piece, sizeof(*piece));
+    cw_reflect_set_position3(w, id, center[0], center[1], center[2]);
+    const char *name = ed_name_of(d, like);
+    if (*name) {
+        char text[CW_SCENE_NAME_CAPACITY];
+        snprintf(text, sizeof(text), "%.*s %s", (int)(sizeof(text) - strlen(suffix) - 2), name, suffix);
+        set_name(d, id, text);
+    }
+    return id;
+}
+size_t ed_csg_subtract(ed_document *d) {
+    if (!d->world_ready || d->gw.brush_ct == CW_INVALID_COMPONENT) return 0;
+    cw_world *w = &d->gw.world;
+    size_t cutters = 0;
+    for (size_t i = 0; i < d->selection_count; ++i) if (brush_of(d, d->selection[i])) ++cutters;
+    if (!cutters) { ed_status(d, true, "select the brush to carve with first"); return 0; }
+    /* the targets: every brush that is not a cutter */
+    cw_entity_id targets[4096];
+    size_t target_count = 0;
+    cw_query q = cw_query_iter(w, cw_mask(&d->gw.brush_ct, 1));
+    cw_entity_id id;
+    while (cw_query_next(&q, &id) && target_count < 4096) if (!ed_is_selected(d, id)) targets[target_count++] = id;
+    size_t made = 0, carved = 0;
+    int dropped_total = 0;
+    cw_entity_id *cutter_ids = malloc(d->selection_count * sizeof(*cutter_ids));
+    if (!cutter_ids) return 0;
+    size_t cutter_n = 0;
+    for (size_t i = 0; i < d->selection_count; ++i) if (brush_of(d, d->selection[i])) cutter_ids[cutter_n++] = d->selection[i];
+    for (size_t t = 0; t < target_count; ++t) {
+        /* the target's pieces so far (it starts as itself); every cutter carves every piece */
+        cw_brush work[CW_BRUSH_MAX_FACES * 4];
+        float centers[CW_BRUSH_MAX_FACES * 4][3];
+        int work_n = 1;
+        work[0] = *brush_of(d, targets[t]);
+        if (!cw_reflect_position3(w, targets[t], &centers[0][0], &centers[0][1], &centers[0][2])) continue;
+        bool touched = false;
+        for (size_t c = 0; c < cutter_n; ++c) {
+            cw_plane planes[CW_BRUSH_MAX_FACES];
+            float cc[3];
+            if (!cw_reflect_position3(w, cutter_ids[c], &cc[0], &cc[1], &cc[2])) continue;
+            int np = cw_brush_planes(brush_of(d, cutter_ids[c]), cc, planes);
+            cw_brush next[CW_BRUSH_MAX_FACES * 4];
+            float next_c[CW_BRUSH_MAX_FACES * 4][3];
+            int next_n = 0;
+            for (int k = 0; k < work_n; ++k) {
+                cw_brush pieces[CW_BRUSH_MAX_FACES];
+                float pc[CW_BRUSH_MAX_FACES][3];
+                int dropped = 0, n = cw_brush_subtract(&work[k], centers[k], planes, np, pieces, pc, &dropped);
+                dropped_total += dropped;
+                if (n < 0) {   /* untouched by this cutter */
+                    if (next_n < CW_BRUSH_MAX_FACES * 4) { next[next_n] = work[k]; memcpy(next_c[next_n], centers[k], sizeof(pc[0])); ++next_n; }
+                    continue;
+                }
+                touched = true;
+                for (int p = 0; p < n && next_n < CW_BRUSH_MAX_FACES * 4; ++p) { next[next_n] = pieces[p]; memcpy(next_c[next_n], pc[p], sizeof(pc[0])); ++next_n; }
+            }
+            memcpy(work, next, sizeof(cw_brush) * (size_t)next_n);
+            memcpy(centers, next_c, sizeof(centers[0]) * (size_t)next_n);
+            work_n = next_n;
+        }
+        if (!touched) continue;
+        ++carved;
+        for (int k = 0; k < work_n; ++k) { spawn_piece(d, targets[t], &work[k], centers[k], "piece"); ++made; }
+        cw_world_mark_destroy(w, targets[t]);
+    }
+    if (carved) {
+        for (size_t c = 0; c < cutter_n; ++c) cw_world_mark_destroy(w, cutter_ids[c]);
+        ed_select_clear(d);
+        cw_game_world_settle(&d->gw);
+        ed_commit(d, "subtract");
+        ed_status(d, false, "carved %zu brush%s into %zu piece%s%s", carved, carved == 1 ? "" : "es", made, made == 1 ? "" : "s", dropped_total ? " (some slivers needed too many planes and were dropped)" : "");
+    } else ed_status(d, true, "the selected brushes touch no other brush");   /* nothing changed: the cutters stay */
+    free(cutter_ids);
+    return made;
+}
+size_t ed_csg_hollow(ed_document *d, float thickness) {
+    if (!d->world_ready || thickness <= 0) return 0;
+    cw_world *w = &d->gw.world;
+    size_t made = 0, hollowed = 0;
+    cw_entity_id *targets = malloc(d->selection_count * sizeof(*targets));
+    if (!targets) return 0;
+    size_t count = d->selection_count;
+    memcpy(targets, d->selection, count * sizeof(*targets));
+    ed_select_clear(d);
+    for (size_t i = 0; i < count; ++i) {
+        const cw_brush *b = brush_of(d, targets[i]);
+        float c[3];
+        if (!b || !cw_reflect_position3(w, targets[i], &c[0], &c[1], &c[2])) { ed_select_add(d, targets[i]); continue; }
+        cw_brush pieces[CW_BRUSH_MAX_FACES];
+        float pc[CW_BRUSH_MAX_FACES][3];
+        int n = cw_brush_hollow(b, c, thickness, pieces, pc, NULL);
+        if (n <= 0) { ed_select_add(d, targets[i]); continue; }
+        for (int k = 0; k < n; ++k) { cw_entity_id piece = spawn_piece(d, targets[i], &pieces[k], pc[k], "wall"); ed_select_add(d, piece); ++made; }
+        cw_world_mark_destroy(w, targets[i]);
+        ++hollowed;
+    }
+    free(targets);
+    cw_game_world_settle(&d->gw);
+    if (hollowed) { ed_commit(d, "hollow"); ed_status(d, false, "hollowed %zu brush%s into %zu walls %.2g thick", hollowed, hollowed == 1 ? "" : "es", made, (double)thickness); }
+    else ed_status(d, true, "select brushes to hollow (too thin ones cannot be)");
+    return made;
+}
+size_t ed_snap_brushes(ed_document *d, float spacing) {
+    if (!d->world_ready || spacing <= 0) return 0;
+    size_t moved = 0;
+    for (size_t i = 0; i < d->selection_count; ++i) {
+        cw_brush *b = brush_of(d, d->selection[i]);
+        float c[3];
+        if (!b || !cw_reflect_position3(&d->gw.world, d->selection[i], &c[0], &c[1], &c[2])) continue;
+        if (!cw_brush_snap_to_grid(b, c, spacing)) continue;
+        cw_comp_touch(&d->gw.world, d->selection[i], d->gw.brush_ct);
+        cw_reflect_set_position3(&d->gw.world, d->selection[i], c[0], c[1], c[2]);
+        ++moved;
+    }
+    if (moved) { ed_commit(d, "snap to grid"); ed_status(d, false, "snapped %zu brush%s to the %g grid", moved, moved == 1 ? "" : "es", (double)spacing); }
+    else ed_status(d, false, "the selected brushes already sit on the grid");
+    return moved;
+}
+bool ed_brush_move_vertex(ed_document *d, cw_entity_id id, const float from[3], const float to[3]) {
+    cw_brush *b = brush_of(d, id);
+    float c[3];
+    if (!b || !cw_reflect_position3(&d->gw.world, id, &c[0], &c[1], &c[2])) return false;
+    if (!cw_brush_move_vertex(b, c, from, to)) return false;
+    cw_comp_touch(&d->gw.world, id, d->gw.brush_ct);
+    return cw_reflect_set_position3(&d->gw.world, id, c[0], c[1], c[2]);
+}
+bool ed_brush_set_face_align(ed_document *d, cw_entity_id id, int face, const cw_brush_align *align) {
+    cw_brush *b = brush_of(d, id);
+    if (!b || !align || face < 0 || face >= CW_BRUSH_MAX_FACES) return false;
+    cw_brush_face_align_set(b, face, align);
+    cw_comp_touch(&d->gw.world, id, d->gw.brush_ct);
+    ed_commit(d, "align texture");
+    return true;
+}
+bool ed_brush_set_face(ed_document *d, cw_entity_id id, int face, float plane) {
+    cw_brush *b = brush_of(d, id);
+    if (!b || face < 0 || face >= CW_BRUSH_FACES) return false;
+    float c[3], lo[3], hi[3];
+    if (!cw_reflect_position3(&d->gw.world, id, &c[0], &c[1], &c[2])) return false;
+    cw_brush_bounds(b, c, lo, hi);
+    int axis = cw_brush_face_axis((cw_brush_face)face);
+    const float min_size = 0.05f;
+    if (cw_brush_face_sign((cw_brush_face)face) > 0) hi[axis] = plane > lo[axis] + min_size ? plane : lo[axis] + min_size;
+    else lo[axis] = plane < hi[axis] - min_size ? plane : hi[axis] - min_size;
+    cw_brush_set_bounds(b, c, lo, hi, min_size);
+    cw_comp_touch(&d->gw.world, id, d->gw.brush_ct);
+    return cw_reflect_set_position3(&d->gw.world, id, c[0], c[1], c[2]);
+}
+bool ed_brush_set_face_material(ed_document *d, cw_entity_id id, int face, uint32_t material) {
+    cw_brush *b = brush_of(d, id);
+    if (!b || face >= CW_BRUSH_MAX_FACES) return false;
+    for (int f = 0; f < CW_BRUSH_MAX_FACES; ++f) if (face < 0 || f == face) b->material[f] = material;
+    cw_comp_touch(&d->gw.world, id, d->gw.brush_ct);
+    const cw_asset *a = cw_assets_find(&d->assets, material);
+    ed_commit(d, "texture face");
+    if (face < 0) ed_status(d, false, "brush #%" PRId64 ": every face now %s", id, a ? a->name : "plain");
+    else ed_status(d, false, "brush #%" PRId64 " %s face: %s", id, cw_brush_face_names[face], a ? a->name : "plain");
+    return true;
+}
+size_t ed_paint(ed_document *d, const float point[3], float radius, uint8_t r, uint8_t g, uint8_t b, float strength) {
+    if (!d->world_ready || d->gw.brush_ct == CW_INVALID_COMPONENT) return 0;
+    cw_world *w = &d->gw.world;
+    cw_query q = cw_query_iter(w, cw_mask(&d->gw.brush_ct, 1));
+    cw_entity_id id;
+    size_t touched = 0;
+    while (cw_query_next(&q, &id)) {
+        float c[3];
+        if (!cw_reflect_position3(w, id, &c[0], &c[1], &c[2])) continue;
+        cw_brush *brush = cw_comp_ptr(w, id, d->gw.brush_ct);
+        size_t n = cw_brush_paint_at(brush, c, point, radius, r, g, b, strength);
+        if (n) { touched += n; cw_comp_touch(w, id, d->gw.brush_ct); }
+    }
+    return touched;
+}
+size_t ed_paint_clear_selection(ed_document *d) {
+    size_t n = 0;
+    for (size_t i = 0; i < d->selection_count; ++i) {
+        cw_brush *b = brush_of(d, d->selection[i]);
+        if (!b || !b->paint.size) continue;
+        cw_brush_paint_clear(b);
+        cw_comp_touch(&d->gw.world, d->selection[i], d->gw.brush_ct);
+        ++n;
+    }
+    if (n) { ed_commit(d, "clear paint"); ed_status(d, false, "cleared the paint of %zu brush%s", n, n == 1 ? "" : "es"); }
+    else ed_status(d, false, "no painted brush selected");
     return n;
 }
 static bool apply_value(ed_document *d, cw_entity_id id, cw_component_id ct, const cw_type_info *t, const void *value, const char *label) {

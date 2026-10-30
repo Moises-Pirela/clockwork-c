@@ -14,6 +14,11 @@
  *
  * Keys: Q select tool   1-9 module prefabs   E create an empty entity   click/drag select, shift adds, drag moves
  *       arrows nudge (shift x10)   Del delete   Ctrl+D duplicate   Ctrl+A all
+ *       3D projects (renderer 3d): right drag orbits, middle drag pans, wheel dollies; click picks the shape under
+ *       the mouse, drags move it over the ground plane, tools place where the mouse meets the ground, V cycles
+ *       the debug view (colour, normals, uv); W/R/S pick the move/rotate/scale gizmo; B draws brushes on the
+ *       ground (drag a footprint), T textures the clicked face with the material panel's material (shift: all
+ *       faces), P paints vertex colours on brushes; a lone selected brush shows face handles to push and pull
  *       Ctrl+Z / Ctrl+Y undo/redo   Ctrl+S save   Ctrl+N new scene
  *       F5 play/stop   Space pause   N step   F7 build module   F8 export game   F9 run player
  *       F fit view   G grid   L preview the game's rendering   F10 settings   F11 fullscreen   Ctrl+Q quit   Esc stop/deselect
@@ -41,7 +46,9 @@
 #include "host_canvas.h"
 #include "host_dock.h"
 #include "host_ui.h"
+#include "host_view3d.h"
 #include "render2d.h"
+#include "render3d.h"
 #include "r2d_post.h"
 #include "r2d_lighting.h"
 #include "r2d_tunables.h"
@@ -58,10 +65,38 @@
 #define STATUS_H 52.0f
 #define ROW_H 22.0f
 
-typedef enum { TOOL_SELECT, TOOL_PLACE, TOOL_PREFAB, TOOL_CREATE } Tool;
+typedef enum { TOOL_SELECT, TOOL_PLACE, TOOL_PREFAB, TOOL_CREATE, TOOL_BRUSH, TOOL_PAINT, TOOL_TEXTURE, TOOL_CLIP, TOOL_VERTEX, TOOL_DECAL } Tool;   /* the last six: 3D projects */
+typedef enum { GIZMO_MOVE, GIZMO_ROTATE, GIZMO_SCALE } GizmoMode;
+/* what a 3D drag holds: a gizmo handle or a brush face */
+typedef enum { DRAG3D_NONE, DRAG3D_AXIS, DRAG3D_RING, DRAG3D_SCALE_AXIS, DRAG3D_SCALE_ALL, DRAG3D_FACE } Drag3DKind;
 static struct {
     ed_document doc;
     host_canvas canvas;
+    host_view3d view3d;              /* the 3D viewport of 3D projects (render3d under render2d's layers) */
+    struct { int mode; bool moved; r3d_vec3 last; r2d_vec2 press; float plane_y; cw_entity_id id; } drag3d;   /* mode: 0 idle, 1 pressed on a shape, 2 pressed on nothing, 3 dragging */
+    GizmoMode gizmo_mode;
+    struct {                         /* the transform gizmo and brush face handles */
+        Drag3DKind kind;             /* DRAG3D_NONE: hovering only */
+        int axis;                    /* 0 x, 1 y, 2 z; a face index for DRAG3D_FACE */
+        Drag3DKind hover_kind;       /* the handle under the mouse this frame */
+        int hover_axis;
+        r3d_vec3 center, dir;        /* the handle's line (or ring axis) */
+        float start, applied;        /* the drag parameter at the press and what has been applied (snapped) */
+        float length;                /* the gizmo's size in world units */
+        float scale_applied;         /* DRAG3D_SCALE_*: the factor applied so far */
+        r3d_vec3 b1, b2;             /* DRAG3D_RING: the ring plane's basis */
+        r2d_vec2 press;
+        cw_entity_id id;
+        bool moved;
+    } gizmo;
+    struct { bool active; r3d_vec3 anchor, current; float base; } brush_drag;   /* the brush tool's footprint drag */
+    int brush_shape;                 /* what the brush tool draws: 0 box, 1 wedge */
+    struct { uint8_t rgb[3]; float radius, strength; bool stroking, stroked; } paint;   /* the paint tool */
+    struct { r3d_vec3 points[3], normals[3]; int count; ed_clip_mode keep; } clip;     /* the clip tool's points */
+    struct { cw_entity_id id; int face; } face_sel;                                      /* the brush face last clicked (texture tool, select tool) */
+    struct { bool active, moved; cw_entity_id id; r3d_vec3 from, current, normal; int hover_index; cw_entity_id hover_id; r3d_vec3 hover; } vertex;   /* the vertex tool's drag and hover */
+    float hollow_thickness;          /* the CSG hollow button's wall thickness */
+    float decal_size, decal_depth;   /* the decal tool's box */
     hd_dock dock;
     ea_state anim;                   /* the animation editor */
     char anim_name[64], anim_length[16], key_time[16], key_value[32];
@@ -137,6 +172,8 @@ typedef hui_layout Layout;
 #define textfield hui_textfield
 static void snap_selection(void);
 static void default_layout(void);
+static void draw_number(Layout *l, const char *label, float *value, float lo, float hi, float step, const void *key, char *buffer, size_t capacity);
+static void clip_apply(void);
 
 /* ---------------------------------------------------------------------------
  * selection sync between the document and render2d's controller
@@ -176,7 +213,11 @@ static r2d_rect level_bounds(void) {
     const float *b = ui.doc.gw.module->bounds;
     return b[2] > 0 && b[3] > 0 ? r2d_rect_make(b[0], b[1], b[2], b[3]) : r2d_rect_make(-400, -300, 800, 600);
 }
-static void fit_view(void) { r2d_camera_fit_rect_in(world_area(), level_bounds(), 24); }
+static bool is_3d(void) { return ui.view3d.ready && ed_is_3d(&ui.doc); }
+static void fit_view(void) {
+    if (is_3d()) { ui.view3d.rect = world_area(); host_view3d_frame_world(&ui.view3d, &ui.doc.gw); }
+    else r2d_camera_fit_rect_in(world_area(), level_bounds(), 24);
+}
 /* The game view: where the interface is laid out. The whole viewport, or a
  * resolution preset's aspect letterboxed into it, to see the layout the
  * way a player with that screen would. */
@@ -339,7 +380,791 @@ static bool handle_ui_input(void) {
     }
     return true;
 }
+/* ---------------------------------------------------------------------------
+ * 3D gizmos and level tools
+ * ------------------------------------------------------------------------- */
+static const r3d_color axis_colors[3] = {{230, 80, 80, 255}, {90, 220, 90, 255}, {90, 130, 255, 255}};
+static r3d_vec3 unit_axis(int a) { return r3d_v3(a == 0 ? 1 : 0, a == 1 ? 1 : 0, a == 2 ? 1 : 0); }
+static float snap3d(float v) { return ed_settings_snap_3d(&ui.prefs, v); }
+/* The surface tools (brush, texture, clip, paint, vertex, decal) look past the decals' boxes. */
+static bool not_a_decal(uint64_t id, void *user) { (void)user; return !ed_is_decal(&ui.doc, (cw_entity_id)id); }
+static bool pick_surface(r3d_ray ray, r3d_pick_hit *hit) { return r3d_pick_filtered(ray, hit, not_a_decal, NULL); }
+static float wrap_angle(float a) { while (a > R3D_PI) a -= 2 * R3D_PI; while (a < -R3D_PI) a += 2 * R3D_PI; return a; }
+/* distance from a point to a screen-space segment */
+static float segment_distance(r2d_vec2 p, r2d_vec2 a, r2d_vec2 b) {
+    r2d_vec2 ab = r2d_sub(b, a);
+    float len2 = r2d_dot(ab, ab);
+    float t = len2 > 1e-6f ? r2d_clampf(r2d_dot(r2d_sub(p, a), ab) / len2, 0, 1) : 0;
+    return r2d_distance(p, r2d_add(a, r2d_scale(ab, t)));
+}
+/* The gizmo's frame for an entity in the current mode: the centre, the
+ * three handle directions and the size. Move uses the world axes, scale the
+ * entity's local axes, rotate the Euler gimbal (x pitched after the yaw, z
+ * after both), so each ring turns exactly one Euler angle. */
+static bool gizmo_frame(cw_entity_id id, r3d_vec3 *center, r3d_vec3 dirs[3], float *length) {
+    cw_world *w = &ui.doc.gw.world;
+    float x, y, z, rx, ry, rz, sx, sy, sz;
+    if (!cw_reflect_position3(w, id, &x, &y, &z)) return false;
+    bool has_rotation = cw_reflect_rotation3(w, id, &rx, &ry, &rz), has_size = cw_reflect_size3(w, id, &sx, &sy, &sz);
+    if (ui.gizmo_mode == GIZMO_ROTATE && !has_rotation) return false;
+    if (ui.gizmo_mode == GIZMO_SCALE && !has_size) return false;
+    *center = r3d_v3(x, y, z);
+    *length = r3d_px_at(*center, 90);
+    if (ui.gizmo_mode == GIZMO_MOVE || !has_rotation) {
+        for (int a = 0; a < 3; ++a) dirs[a] = unit_axis(a);
+    } else if (ui.gizmo_mode == GIZMO_SCALE) {
+        r3d_mat4 rot = r3d_mat4_rotation(r3d_v3(rx, ry, rz));
+        for (int a = 0; a < 3; ++a) dirs[a] = r3d_normalize(r3d_mat4_transform_vector(&rot, unit_axis(a)));
+    } else {
+        r3d_mat4 yaw = r3d_mat4_rotation_y(ry), yaw_pitch = r3d_mat4_multiply(yaw, r3d_mat4_rotation_x(rx));
+        dirs[0] = r3d_normalize(r3d_mat4_transform_vector(&yaw, unit_axis(0)));
+        dirs[1] = unit_axis(1);
+        dirs[2] = r3d_normalize(r3d_mat4_transform_vector(&yaw_pitch, unit_axis(2)));
+    }
+    return true;
+}
+/* The one brush whose faces have handles: a lone selected brush in move mode. */
+static cw_entity_id face_handle_brush(void) {
+    if (ui.gizmo_mode != GIZMO_MOVE || ui.doc.selection_count != 1 || !ed_is_brush(&ui.doc, ui.doc.selection[0])) return CW_INVALID_ENTITY;
+    return ui.doc.selection[0];
+}
+/* The centre of a brush's box face; false when the face was clipped away
+ * (the centroid of what is left of it is used when it still exists). */
+static bool face_center_of(cw_entity_id id, int face, r3d_vec3 *out) {
+    const cw_brush *b = cw_comp_ptr(&ui.doc.gw.world, id, ui.doc.gw.brush_ct);
+    float c[3];
+    cw_brush_polygon poly;
+    if (!b || !cw_reflect_position3(&ui.doc.gw.world, id, &c[0], &c[1], &c[2]) || !cw_brush_face_polygon(b, c, face, &poly) || poly.count < 3) return false;
+    r3d_vec3 sum = r3d_v3(0, 0, 0);
+    for (int i = 0; i < poly.count; ++i) sum = r3d_add(sum, r3d_v3(poly.p[i][0], poly.p[i][1], poly.p[i][2]));
+    *out = r3d_scale(sum, 1.0f / (float)poly.count);
+    return true;
+}
+/* Which handle is under the mouse. */
+static void gizmo_hover(r2d_vec2 m, Drag3DKind *kind, int *axis) {
+    *kind = DRAG3D_NONE;
+    *axis = -1;
+    float best = 9;
+    /* face handles first: small, and they share the gizmo's space */
+    cw_entity_id brush = face_handle_brush();
+    if (brush != CW_INVALID_ENTITY) {
+        for (int f = 0; f < CW_BRUSH_FACES; ++f) {
+            float sx, sy;
+            r3d_vec3 fc;
+            if (!face_center_of(brush, f, &fc) || !r3d_world_to_screen(fc, &sx, &sy)) continue;
+            float d = r2d_distance(m, r2d_v2(sx, sy));
+            if (d < best) { best = d; *kind = DRAG3D_FACE; *axis = f; }
+        }
+        if (*kind == DRAG3D_FACE) return;
+    }
+    cw_entity_id id = ed_primary(&ui.doc);
+    r3d_vec3 center, dirs[3];
+    float length;
+    if (id != CW_INVALID_ENTITY && gizmo_frame(id, &center, dirs, &length)) {
+        float cx, cy;
+        bool center_visible = r3d_world_to_screen(center, &cx, &cy);
+        for (int a = 0; a < 3; ++a) {
+            if (ui.gizmo_mode == GIZMO_ROTATE) {
+                r3d_vec3 b1 = r3d_normalize(r3d_cross(dirs[a], fabsf(dirs[a].y) < 0.9f ? r3d_v3(0, 1, 0) : r3d_v3(1, 0, 0))), b2 = r3d_cross(dirs[a], b1);
+                float radius = length * 0.9f;
+                r2d_vec2 prev = r2d_v2(0, 0);
+                bool prev_ok = false;
+                for (int i = 0; i <= 48; ++i) {
+                    float t = 2 * R3D_PI * (float)i / 48;
+                    r3d_vec3 p = r3d_add(center, r3d_add(r3d_scale(b1, cosf(t) * radius), r3d_scale(b2, sinf(t) * radius)));
+                    float sx, sy;
+                    bool ok = r3d_world_to_screen(p, &sx, &sy);
+                    r2d_vec2 cur = r2d_v2(sx, sy);
+                    if (ok && prev_ok) {
+                        float d = segment_distance(m, prev, cur);
+                        if (d < best) { best = d; *kind = DRAG3D_RING; *axis = a; }
+                    }
+                    prev = cur;
+                    prev_ok = ok;
+                }
+            } else if (center_visible) {
+                float tx, ty;
+                if (!r3d_world_to_screen(r3d_add(center, r3d_scale(dirs[a], length)), &tx, &ty)) continue;
+                float d = segment_distance(m, r2d_v2(cx, cy), r2d_v2(tx, ty));
+                if (d < best) { best = d; *kind = ui.gizmo_mode == GIZMO_MOVE ? DRAG3D_AXIS : DRAG3D_SCALE_AXIS; *axis = a; }
+            }
+        }
+        if (ui.gizmo_mode == GIZMO_SCALE && center_visible && r2d_distance(m, r2d_v2(cx, cy)) < 10) { best = 0; *kind = DRAG3D_SCALE_ALL; *axis = 0; }
+    }
+}
+static void draw_gizmo(void) {
+    cw_entity_id id = ed_primary(&ui.doc);
+    r3d_vec3 center, dirs[3];
+    float length;
+    r3d_color yellow3 = r3d_rgb(yellow.r, yellow.g, yellow.b);
+    if (id != CW_INVALID_ENTITY && gizmo_frame(id, &center, dirs, &length)) {
+        bool active = ui.gizmo.kind != DRAG3D_NONE && ui.gizmo.kind != DRAG3D_FACE;
+        for (int a = 0; a < 3; ++a) {
+            bool hot = active ? ui.gizmo.axis == a && ui.gizmo.kind != DRAG3D_SCALE_ALL : (ui.gizmo.hover_axis == a && ui.gizmo.hover_kind != DRAG3D_NONE && ui.gizmo.hover_kind != DRAG3D_FACE && ui.gizmo.hover_kind != DRAG3D_SCALE_ALL);
+            if (active && ui.gizmo.kind == DRAG3D_SCALE_ALL) hot = true;
+            r3d_color c = hot ? yellow3 : axis_colors[a];
+            if (ui.gizmo_mode == GIZMO_ROTATE) {
+                r3d_vec3 b1 = r3d_normalize(r3d_cross(dirs[a], fabsf(dirs[a].y) < 0.9f ? r3d_v3(0, 1, 0) : r3d_v3(1, 0, 0))), b2 = r3d_cross(dirs[a], b1);
+                float radius = length * 0.9f;
+                for (int i = 0; i < 48; ++i) {
+                    float t0 = 2 * R3D_PI * (float)i / 48, t1 = 2 * R3D_PI * (float)(i + 1) / 48;
+                    r3d_draw_line_overlay(r3d_add(center, r3d_add(r3d_scale(b1, cosf(t0) * radius), r3d_scale(b2, sinf(t0) * radius))),
+                                          r3d_add(center, r3d_add(r3d_scale(b1, cosf(t1) * radius), r3d_scale(b2, sinf(t1) * radius))), c);
+                }
+            } else {
+                r3d_vec3 tip = r3d_add(center, r3d_scale(dirs[a], length));
+                r3d_draw_line_overlay(center, tip, c);
+                r3d_vec3 side = r3d_normalize(r3d_cross(dirs[a], fabsf(dirs[a].y) < 0.9f ? r3d_v3(0, 1, 0) : r3d_v3(1, 0, 0))), side2 = r3d_cross(dirs[a], side);
+                float k = length * 0.07f;
+                if (ui.gizmo_mode == GIZMO_MOVE) {   /* an arrow head */
+                    r3d_vec3 base = r3d_sub(tip, r3d_scale(dirs[a], k * 2.2f));
+                    r3d_draw_line_overlay(tip, r3d_add(base, r3d_scale(side, k)), c);
+                    r3d_draw_line_overlay(tip, r3d_sub(base, r3d_scale(side, k)), c);
+                    r3d_draw_line_overlay(tip, r3d_add(base, r3d_scale(side2, k)), c);
+                    r3d_draw_line_overlay(tip, r3d_sub(base, r3d_scale(side2, k)), c);
+                } else {   /* a cube tip */
+                    r3d_vec3 corners[8];
+                    for (int i = 0; i < 8; ++i)
+                        corners[i] = r3d_add(tip, r3d_add(r3d_scale(dirs[a], (i & 1) ? k : -k), r3d_add(r3d_scale(side, (i & 2) ? k : -k), r3d_scale(side2, (i & 4) ? k : -k))));
+                    static const int edges[12][2] = {{0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7}, {7, 6}, {6, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+                    for (int i = 0; i < 12; ++i) r3d_draw_line_overlay(corners[edges[i][0]], corners[edges[i][1]], c);
+                }
+            }
+        }
+        if (ui.gizmo_mode == GIZMO_SCALE) {   /* the uniform handle at the centre */
+            bool hot = ui.gizmo.kind == DRAG3D_SCALE_ALL || (ui.gizmo.kind == DRAG3D_NONE && ui.gizmo.hover_kind == DRAG3D_SCALE_ALL);
+            float k = length * 0.08f;
+            r3d_draw_box_outline(r3d_sub(center, r3d_v3(k, k, k)), r3d_add(center, r3d_v3(k, k, k)), hot ? yellow3 : r3d_rgb(230, 230, 240));
+        }
+        if (ui.gizmo.kind == DRAG3D_RING) {   /* the angle turned so far */
+            float a0 = ui.gizmo.start, a1 = ui.gizmo.start + ui.gizmo.applied, radius = length * 0.9f;
+            r3d_draw_line_overlay(center, r3d_add(center, r3d_add(r3d_scale(ui.gizmo.b1, cosf(a0) * radius), r3d_scale(ui.gizmo.b2, sinf(a0) * radius))), r3d_rgba(255, 255, 255, 120));
+            r3d_draw_line_overlay(center, r3d_add(center, r3d_add(r3d_scale(ui.gizmo.b1, cosf(a1) * radius), r3d_scale(ui.gizmo.b2, sinf(a1) * radius))), yellow3);
+        }
+    }
+    cw_entity_id brush = face_handle_brush();
+    if (brush != CW_INVALID_ENTITY) {
+        for (int f = 0; f < CW_BRUSH_FACES; ++f) {
+            r3d_vec3 c;
+            if (!face_center_of(brush, f, &c)) continue;
+            int ua, va;
+            cw_brush_face_tangents((cw_brush_face)f, &ua, &va);
+            float k = r3d_px_at(c, 6);
+            r3d_vec3 u = r3d_scale(unit_axis(ua), k), v = r3d_scale(unit_axis(va), k);
+            bool hot = (ui.gizmo.kind == DRAG3D_FACE && ui.gizmo.axis == f) || (ui.gizmo.kind == DRAG3D_NONE && ui.gizmo.hover_kind == DRAG3D_FACE && ui.gizmo.hover_axis == f);
+            r3d_color col = hot ? yellow3 : r3d_rgb(120, 220, 240);
+            r3d_vec3 p0 = r3d_sub(r3d_sub(c, u), v), p1 = r3d_sub(r3d_add(c, u), v), p2 = r3d_add(r3d_add(c, u), v), p3 = r3d_add(r3d_sub(c, u), v);
+            r3d_draw_line_overlay(p0, p1, col); r3d_draw_line_overlay(p1, p2, col); r3d_draw_line_overlay(p2, p3, col); r3d_draw_line_overlay(p3, p0, col);
+            r3d_draw_line_overlay(p0, p2, col); r3d_draw_line_overlay(p1, p3, col);
+        }
+    }
+}
+/* The face of a brush a hit point lies on (clip faces included). */
+static int brush_face_hit(cw_entity_id id, r3d_vec3 point) {
+    const cw_brush *b = cw_comp_ptr(&ui.doc.gw.world, id, ui.doc.gw.brush_ct);
+    float c[3], p[3] = {point.x, point.y, point.z};
+    if (!b || !cw_reflect_position3(&ui.doc.gw.world, id, &c[0], &c[1], &c[2])) return -1;
+    return cw_brush_face_of_point(b, c, p);
+}
+/* The edges of a brush's faces (clipped brushes are not boxes). */
+static void draw_brush_outline(cw_entity_id id, r3d_color color) {
+    const cw_brush *b = cw_comp_ptr(&ui.doc.gw.world, id, ui.doc.gw.brush_ct);
+    float c[3];
+    if (!b || !cw_reflect_position3(&ui.doc.gw.world, id, &c[0], &c[1], &c[2])) return;
+    int faces = cw_brush_face_count(b);
+    for (int f = 0; f < faces; ++f) {
+        cw_brush_polygon poly;
+        cw_brush_face_polygon(b, c, f, &poly);
+        for (int i = 0; i < poly.count; ++i) {
+            const float *a = poly.p[i], *d = poly.p[(i + 1) % poly.count];
+            r3d_draw_line_overlay(r3d_v3(a[0], a[1], a[2]), r3d_v3(d[0], d[1], d[2]), color);
+        }
+    }
+}
+/* The clip tool's plane from its points: two points and the first face's
+ * normal, or three points. False until there are enough. */
+static bool clip_plane(float n[3], float *dist) {
+    if (ui.clip.count < 2) return false;
+    r3d_vec3 p0 = ui.clip.points[0], p1 = ui.clip.points[1];
+    r3d_vec3 normal;
+    if (ui.clip.count >= 3) normal = r3d_cross(r3d_sub(p1, p0), r3d_sub(ui.clip.points[2], p0));
+    else normal = r3d_cross(r3d_sub(p1, p0), ui.clip.normals[0]);
+    if (r3d_length(normal) < 1e-6f) return false;
+    normal = r3d_normalize(normal);
+    n[0] = normal.x; n[1] = normal.y; n[2] = normal.z;
+    *dist = r3d_dot(normal, p0);
+    return true;
+}
+static void clip_apply(void) {
+    float n[3], dist;
+    if (!clip_plane(n, &dist)) { ed_status(&ui.doc, true, "the clip needs two points on a face (or three anywhere) first"); return; }
+    if (!ui.doc.selection_count) { ed_status(&ui.doc, true, "select the brushes to cut first"); return; }
+    ed_clip_selection(&ui.doc, n, dist, ui.clip.keep);
+    selection_to_r2d();
+    ui.clip.count = 0;
+}
+/* The gizmo's drags: returns true while it owns the mouse. */
+static bool gizmo_input(r2d_vec2 m, bool in_viewport, bool blocked) {
+    ed_document *d = &ui.doc;
+    r3d_ray ray = r3d_screen_ray(m.x, m.y);
+    if (ui.gizmo.kind == DRAG3D_NONE) {
+        if (in_viewport && !blocked && ui.tool == TOOL_SELECT) gizmo_hover(m, &ui.gizmo.hover_kind, &ui.gizmo.hover_axis);
+        else { ui.gizmo.hover_kind = DRAG3D_NONE; ui.gizmo.hover_axis = -1; }
+        if (ui.gizmo.hover_kind == DRAG3D_NONE || !r2d_mouse_pressed(R2D_MOUSE_LEFT) || !in_viewport || blocked) return false;
+        /* start */
+        ui.gizmo.kind = ui.gizmo.hover_kind;
+        ui.gizmo.axis = ui.gizmo.hover_axis;
+        ui.gizmo.press = m;
+        ui.gizmo.moved = false;
+        ui.gizmo.applied = 0;
+        ui.gizmo.scale_applied = 1;
+        ui.gizmo.id = ed_primary(d);
+        r3d_vec3 dirs[3];
+        if (ui.gizmo.kind == DRAG3D_FACE) {
+            ui.gizmo.id = face_handle_brush();
+            if (ui.gizmo.id == CW_INVALID_ENTITY || !face_center_of(ui.gizmo.id, ui.gizmo.axis, &ui.gizmo.center)) { ui.gizmo.kind = DRAG3D_NONE; return false; }
+            int axis = cw_brush_face_axis((cw_brush_face)ui.gizmo.axis);
+            ui.gizmo.dir = unit_axis(axis);
+            ui.gizmo.applied = (&ui.gizmo.center.x)[axis];   /* the face plane now */
+            if (!r3d_ray_line_closest(ray, ui.gizmo.center, ui.gizmo.dir, &ui.gizmo.start)) { ui.gizmo.kind = DRAG3D_NONE; return false; }
+            return true;
+        }
+        if (!gizmo_frame(ui.gizmo.id, &ui.gizmo.center, dirs, &ui.gizmo.length)) { ui.gizmo.kind = DRAG3D_NONE; return false; }
+        ui.gizmo.dir = dirs[ui.gizmo.axis];
+        if (ui.gizmo.kind == DRAG3D_RING) {
+            ui.gizmo.b1 = r3d_normalize(r3d_cross(ui.gizmo.dir, fabsf(ui.gizmo.dir.y) < 0.9f ? r3d_v3(0, 1, 0) : r3d_v3(1, 0, 0)));
+            ui.gizmo.b2 = r3d_cross(ui.gizmo.dir, ui.gizmo.b1);
+            float t;
+            if (!r3d_ray_plane(ray, ui.gizmo.center, ui.gizmo.dir, &t)) { ui.gizmo.kind = DRAG3D_NONE; return false; }
+            r3d_vec3 v = r3d_sub(r3d_ray_point(ray, t), ui.gizmo.center);
+            ui.gizmo.start = atan2f(r3d_dot(v, ui.gizmo.b2), r3d_dot(v, ui.gizmo.b1));
+        } else if (ui.gizmo.kind == DRAG3D_SCALE_ALL) {
+            ui.gizmo.start = m.x;
+        } else if (!r3d_ray_line_closest(ray, ui.gizmo.center, ui.gizmo.dir, &ui.gizmo.start)) { ui.gizmo.kind = DRAG3D_NONE; return false; }
+        return true;
+    }
+    /* update */
+    if (r2d_mouse_down(R2D_MOUSE_LEFT)) {
+        switch (ui.gizmo.kind) {
+            case DRAG3D_AXIS: {
+                float t;
+                if (!r3d_ray_line_closest(ray, ui.gizmo.center, ui.gizmo.dir, &t)) break;
+                float total = snap3d(t - ui.gizmo.start), delta = total - ui.gizmo.applied;
+                if (delta != 0) {
+                    ed_move_selection3(d, ui.gizmo.dir.x * delta, ui.gizmo.dir.y * delta, ui.gizmo.dir.z * delta);
+                    ui.gizmo.applied = total;
+                    ui.gizmo.moved = true;
+                }
+                break;
+            }
+            case DRAG3D_SCALE_AXIS:
+            case DRAG3D_SCALE_ALL: {
+                float factor;
+                if (ui.gizmo.kind == DRAG3D_SCALE_ALL) factor = 1 + (m.x - ui.gizmo.start) / 120;
+                else {
+                    float t;
+                    if (!r3d_ray_line_closest(ray, ui.gizmo.center, ui.gizmo.dir, &t)) break;
+                    factor = 1 + (t - ui.gizmo.start) / (ui.gizmo.length > 1e-4f ? ui.gizmo.length : 1);
+                }
+                if (ui.prefs.snap) factor = roundf(factor * 4) / 4;   /* quarter steps */
+                if (factor < 0.01f) factor = 0.01f;
+                float ratio = factor / ui.gizmo.scale_applied;
+                if (fabsf(ratio - 1) > 1e-6f) {
+                    bool all = ui.gizmo.kind == DRAG3D_SCALE_ALL;
+                    ed_scale_selection(d, all || ui.gizmo.axis == 0 ? ratio : 1, all || ui.gizmo.axis == 1 ? ratio : 1, all || ui.gizmo.axis == 2 ? ratio : 1);
+                    ui.gizmo.scale_applied = factor;
+                    ui.gizmo.moved = true;
+                }
+                break;
+            }
+            case DRAG3D_RING: {
+                float t;
+                if (!r3d_ray_plane(ray, ui.gizmo.center, ui.gizmo.dir, &t)) break;
+                r3d_vec3 v = r3d_sub(r3d_ray_point(ray, t), ui.gizmo.center);
+                float angle = atan2f(r3d_dot(v, ui.gizmo.b2), r3d_dot(v, ui.gizmo.b1));
+                float total = wrap_angle(angle - ui.gizmo.start);
+                if (ui.prefs.snap) total = roundf(total / (R3D_PI / 12)) * (R3D_PI / 12);   /* 15 degree steps */
+                float delta = total - ui.gizmo.applied;
+                if (delta != 0) {
+                    ed_rotate_selection(d, ui.gizmo.axis == 0 ? delta : 0, ui.gizmo.axis == 1 ? delta : 0, ui.gizmo.axis == 2 ? delta : 0);
+                    ui.gizmo.applied = total;
+                    ui.gizmo.moved = true;
+                }
+                break;
+            }
+            case DRAG3D_FACE: {
+                float t;
+                if (!r3d_ray_line_closest(ray, ui.gizmo.center, ui.gizmo.dir, &t)) break;
+                int axis = cw_brush_face_axis((cw_brush_face)ui.gizmo.axis);
+                float plane = snap3d((&ui.gizmo.center.x)[axis] + (t - ui.gizmo.start));
+                if (plane != ui.gizmo.applied && ed_brush_set_face(d, ui.gizmo.id, ui.gizmo.axis, plane)) { ui.gizmo.applied = plane; ui.gizmo.moved = true; }
+                break;
+            }
+            default: break;
+        }
+        return true;
+    }
+    /* release */
+    if (ui.gizmo.moved) {
+        const char *what = ui.gizmo.kind == DRAG3D_RING ? "rotate" : (ui.gizmo.kind == DRAG3D_FACE ? "resize brush" : (ui.gizmo.kind == DRAG3D_AXIS ? "move" : "scale"));
+        ed_commit(d, what);
+        if (ui.gizmo.kind == DRAG3D_RING) {
+            float rx, ry, rz;
+            cw_reflect_rotation3(&d->gw.world, ui.gizmo.id, &rx, &ry, &rz);
+            ed_status(d, false, "rotated by %.1f degrees: now %.1f, %.1f, %.1f", (double)(ui.gizmo.applied * 180 / R3D_PI), (double)(rx * 180 / R3D_PI), (double)(ry * 180 / R3D_PI), (double)(rz * 180 / R3D_PI));
+        } else if (ui.gizmo.kind == DRAG3D_FACE) ed_status(d, false, "brush #%" PRId64 " %s face at %.2f", ui.gizmo.id, cw_brush_face_names[ui.gizmo.axis], (double)ui.gizmo.applied);
+        else ed_status(d, false, "%s: %zu entit%s", what, d->selection_count, d->selection_count == 1 ? "y" : "ies");
+    }
+    ui.gizmo.kind = DRAG3D_NONE;
+    return true;   /* the release still belongs to the gizmo */
+}
+/* The brush, texture and paint tools; true while one of them owns the mouse. */
+static bool level_tools_input(r2d_vec2 m, bool in_viewport, bool blocked) {
+    ed_document *d = &ui.doc;
+    if (ui.tool != TOOL_BRUSH) ui.brush_drag.active = false;
+    if (ui.tool != TOOL_PAINT) ui.paint.stroking = false;
+    if (ui.tool != TOOL_CLIP) ui.clip.count = 0;
+    if (ui.tool != TOOL_VERTEX) ui.vertex.active = false;
+    if (ui.tool == TOOL_BRUSH) {
+        r3d_ray ray = r3d_screen_ray(m.x, m.y);
+        if (!ui.brush_drag.active && r2d_mouse_pressed(R2D_MOUSE_LEFT) && in_viewport && !blocked) {
+            r3d_pick_hit hit;
+            float base = 0;
+            if (pick_surface(ray, &hit) && hit.normal.y > 0.5f) base = snap3d(hit.point.y);   /* start on top of what was clicked */
+            r3d_vec3 g;
+            if (r3d_ray_ground(ray, base, &g)) {
+                ui.brush_drag.active = true;
+                ui.brush_drag.base = base;
+                ui.brush_drag.anchor = ui.brush_drag.current = r3d_v3(snap3d(g.x), base, snap3d(g.z));
+            }
+            return true;
+        }
+        if (ui.brush_drag.active) {
+            r3d_vec3 g;
+            if (r3d_ray_ground(ray, ui.brush_drag.base, &g)) ui.brush_drag.current = r3d_v3(snap3d(g.x), ui.brush_drag.base, snap3d(g.z));
+            if (!r2d_mouse_down(R2D_MOUSE_LEFT)) {
+                float step = ui.prefs.grid_spacing_3d > 0 ? ui.prefs.grid_spacing_3d : 1;
+                float height = ui.prefs.brush_height > 0 ? ui.prefs.brush_height : step;
+                float lo[3] = {r3d_minf(ui.brush_drag.anchor.x, ui.brush_drag.current.x), ui.brush_drag.base, r3d_minf(ui.brush_drag.anchor.z, ui.brush_drag.current.z)};
+                float hi[3] = {r3d_maxf(ui.brush_drag.anchor.x, ui.brush_drag.current.x), ui.brush_drag.base + height, r3d_maxf(ui.brush_drag.anchor.z, ui.brush_drag.current.z)};
+                if (hi[0] - lo[0] < step * 0.5f) hi[0] = lo[0] + step;   /* a click makes a one-step block */
+                if (hi[2] - lo[2] < step * 0.5f) hi[2] = lo[2] + step;
+                uint32_t material = ui.material_open ? ui.material_asset : 0;
+                if (ui.brush_shape == 1) {   /* a ramp rising along the footprint's longer axis, away from the anchor */
+                    int axis = hi[0] - lo[0] >= hi[2] - lo[2] ? 0 : 2;
+                    float sign = (axis == 0 ? ui.brush_drag.current.x - ui.brush_drag.anchor.x : ui.brush_drag.current.z - ui.brush_drag.anchor.z) >= 0 ? 1.0f : -1.0f;
+                    ed_create_wedge(d, lo, hi, material, axis, sign);
+                } else ed_create_brush(d, lo, hi, material);
+                selection_to_r2d();
+                ui.brush_drag.active = false;
+                if (!(r2d_modifiers() & SAPP_MODIFIER_SHIFT)) ui.tool = TOOL_SELECT;
+            }
+            return true;
+        }
+        return false;
+    }
+    if (ui.tool == TOOL_TEXTURE) {
+        if (r2d_mouse_pressed(R2D_MOUSE_LEFT) && in_viewport && !blocked) {
+            r3d_pick_hit hit;
+            if (!pick_surface(r3d_screen_ray(m.x, m.y), &hit)) return true;
+            uint32_t material = ui.material_open ? ui.material_asset : 0;
+            cw_entity_id id = (cw_entity_id)hit.id;
+            if (!material && !(r2d_modifiers() & SAPP_MODIFIER_ALT)) { ed_status(d, true, "pick a material in the material panel first (alt-click only selects the face)"); return true; }
+            if (ed_is_brush(d, id)) {
+                int face = brush_face_hit(id, hit.point);
+                ui.face_sel.id = id;
+                ui.face_sel.face = face;
+                if (!ed_is_selected(d, id)) { ed_select_set(d, id); selection_to_r2d(); }
+                if (r2d_modifiers() & SAPP_MODIFIER_ALT) ed_status(d, false, "face %s of #%" PRId64 " selected (arrows shift, [ ] rotate, - = scale)", face >= 0 ? cw_brush_face_names[face] : "?", id);
+                else ed_brush_set_face_material(d, id, (r2d_modifiers() & SAPP_MODIFIER_SHIFT) ? -1 : face, material);
+            } else if (cw_comp_has(&d->gw.world, id, d->gw.shape3d_ct)) {
+                const cw_asset *a = cw_assets_find(&d->assets, material);
+                char at[CW_ASSET_NAME_CAPACITY + 2];
+                snprintf(at, sizeof(at), "@%s", a ? a->name : "");
+                if (a && ed_set_field(d, id, d->gw.shape3d_ct, cw_type_field(&cw_shape3d_type, "material"), at)) ed_status(d, false, "#%" PRId64 " now shows %s", id, a->name);
+            } else ed_status(d, true, "#%" PRId64 " has no surface to texture", id);
+            return true;
+        }
+        return false;
+    }
+    if (ui.tool == TOOL_CLIP) {
+        if (r2d_mouse_pressed(R2D_MOUSE_LEFT) && in_viewport && !blocked) {
+            r3d_pick_hit hit;
+            r3d_ray ray = r3d_screen_ray(m.x, m.y);
+            r3d_vec3 point, normal = r3d_v3(0, 1, 0);
+            if (pick_surface(ray, &hit)) { point = hit.point; normal = hit.normal; }
+            else if (!r3d_ray_ground(ray, 0, &point)) return true;
+            if (ui.prefs.snap) point = r3d_v3(snap3d(point.x), snap3d(point.y), snap3d(point.z));
+            if (ui.clip.count < 3) { ui.clip.points[ui.clip.count] = point; ui.clip.normals[ui.clip.count] = normal; ++ui.clip.count; }
+            else { ui.clip.points[0] = point; ui.clip.normals[0] = normal; ui.clip.count = 1; }
+            return true;
+        }
+        return false;
+    }
+    if (ui.tool == TOOL_VERTEX) {
+        r3d_ray ray = r3d_screen_ray(m.x, m.y);
+        if (!ui.vertex.active) {
+            /* the vertex of a selected brush nearest the mouse, within a few pixels */
+            ui.vertex.hover_id = CW_INVALID_ENTITY;
+            ui.vertex.hover_index = -1;
+            float best = 10;
+            if (in_viewport && !blocked)
+                for (size_t i = 0; i < d->selection_count; ++i) {
+                    cw_entity_id id = d->selection[i];
+                    float verts[CW_BRUSH_MAX_FACES * 3][3], c[3];
+                    if (!ed_is_brush(d, id) || !cw_reflect_position3(&d->gw.world, id, &c[0], &c[1], &c[2])) continue;
+                    int n = cw_brush_vertices(cw_comp_ptr(&d->gw.world, id, d->gw.brush_ct), c, verts, CW_BRUSH_MAX_FACES * 3);
+                    for (int k = 0; k < n; ++k) {
+                        float sx, sy;
+                        r3d_vec3 p = r3d_v3(verts[k][0], verts[k][1], verts[k][2]);
+                        if (!r3d_world_to_screen(p, &sx, &sy)) continue;
+                        float dist = r2d_length(r2d_sub(r2d_v2(sx, sy), m));
+                        if (dist < best) { best = dist; ui.vertex.hover_id = id; ui.vertex.hover_index = k; ui.vertex.hover = p; }
+                    }
+                }
+            if (r2d_mouse_pressed(R2D_MOUSE_LEFT) && in_viewport && !blocked) {
+                if (ui.vertex.hover_id == CW_INVALID_ENTITY) {
+                    /* not on a vertex: select the brush clicked, like the select tool */
+                    r3d_pick_hit hit;
+                    if (pick_surface(ray, &hit) && ed_is_brush(d, (cw_entity_id)hit.id)) {
+                        if (r2d_modifiers() & SAPP_MODIFIER_SHIFT) ed_select_toggle(d, (cw_entity_id)hit.id); else ed_select_set(d, (cw_entity_id)hit.id);
+                        selection_to_r2d();
+                    }
+                    return true;
+                }
+                ui.vertex.active = true;
+                ui.vertex.moved = false;
+                ui.vertex.id = ui.vertex.hover_id;
+                ui.vertex.from = ui.vertex.current = ui.vertex.hover;
+                /* the drag plane faces the camera through the vertex; alt: a horizontal plane */
+                ui.vertex.normal = (r2d_modifiers() & SAPP_MODIFIER_ALT) ? r3d_v3(0, 1, 0) : r3d_scale(r3d_camera_forward(r3d_camera_ptr()), -1);
+                return true;
+            }
+            return false;
+        }
+        float t;
+        if (r3d_ray_plane(ray, ui.vertex.current, ui.vertex.normal, &t)) {
+            r3d_vec3 p = r3d_ray_point(ray, t);
+            /* the offset from the press, snapped, keeps the vertex on the grid it started on */
+            r3d_vec3 target = r3d_v3(snap3d(p.x), snap3d(p.y), snap3d(p.z));
+            if (!ui.prefs.snap) target = p;
+            float from[3] = {ui.vertex.current.x, ui.vertex.current.y, ui.vertex.current.z}, to[3] = {target.x, target.y, target.z};
+            if (r3d_length(r3d_sub(target, ui.vertex.current)) > 1e-5f && ed_brush_move_vertex(d, ui.vertex.id, from, to)) {
+                ui.vertex.current = target;
+                ui.vertex.moved = true;
+            }
+        }
+        if (!r2d_mouse_down(R2D_MOUSE_LEFT)) {
+            ui.vertex.active = false;
+            if (ui.vertex.moved) {
+                ed_commit(d, "move vertex");
+                ed_status(d, false, "vertex of #%" PRId64 " moved to %.2f, %.2f, %.2f", ui.vertex.id, (double)ui.vertex.current.x, (double)ui.vertex.current.y, (double)ui.vertex.current.z);
+            }
+        }
+        return true;
+    }
+    if (ui.tool == TOOL_DECAL) {
+        if (r2d_mouse_pressed(R2D_MOUSE_LEFT) && in_viewport && !blocked) {
+            r3d_pick_hit hit;
+            r3d_ray ray = r3d_screen_ray(m.x, m.y);
+            float point[3], normal[3] = {0, 1, 0};
+            if (pick_surface(ray, &hit)) {
+                point[0] = hit.point.x; point[1] = hit.point.y; point[2] = hit.point.z;
+                if (r3d_length(hit.normal) > 0.5f) { normal[0] = hit.normal.x; normal[1] = hit.normal.y; normal[2] = hit.normal.z; }
+            } else {
+                r3d_vec3 g;
+                if (!r3d_ray_ground(ray, 0, &g)) { ed_status(d, true, "nothing to put a decal on there"); return true; }
+                point[0] = g.x; point[1] = g.y; point[2] = g.z;
+            }
+            if (ui.prefs.snap) for (int a = 0; a < 3; ++a) point[a] = snap3d(point[a]);
+            float size = ui.decal_size > 0 ? ui.decal_size : 1, depth = ui.decal_depth > 0 ? ui.decal_depth : 0.5f;
+            ed_create_decal(d, point, normal, size, depth, ui.material_open ? ui.material_asset : 0);
+            selection_to_r2d();
+            if (!(r2d_modifiers() & SAPP_MODIFIER_SHIFT)) ui.tool = TOOL_SELECT;
+            return true;
+        }
+        return false;
+    }
+    if (ui.tool == TOOL_PAINT) {
+        if (r2d_mouse_pressed(R2D_MOUSE_LEFT) && in_viewport && !blocked) { ui.paint.stroking = true; ui.paint.stroked = false; }
+        if (ui.paint.stroking) {
+            if (r2d_mouse_down(R2D_MOUSE_LEFT)) {
+                r3d_pick_hit hit;
+                if (in_viewport && pick_surface(r3d_screen_ray(m.x, m.y), &hit)) {
+                    float point[3] = {hit.point.x, hit.point.y, hit.point.z};
+                    if (ed_paint(d, point, ui.paint.radius, ui.paint.rgb[0], ui.paint.rgb[1], ui.paint.rgb[2], ui.paint.strength)) ui.paint.stroked = true;
+                }
+            } else {
+                ui.paint.stroking = false;
+                if (ui.paint.stroked) { ed_commit(d, "paint"); ed_status(d, false, "painted"); }
+            }
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+/* What the level tools show: the brush being drawn, the paint cursor, the light gizmos. */
+static void draw_level_tools(void) {
+    ed_document *d = &ui.doc;
+    r3d_color yellow3 = r3d_rgb(yellow.r, yellow.g, yellow.b);
+    if (ui.tool == TOOL_BRUSH && ui.brush_drag.active) {
+        float step = ui.prefs.grid_spacing_3d > 0 ? ui.prefs.grid_spacing_3d : 1, height = ui.prefs.brush_height > 0 ? ui.prefs.brush_height : step;
+        r3d_vec3 lo = r3d_v3(r3d_minf(ui.brush_drag.anchor.x, ui.brush_drag.current.x), ui.brush_drag.base, r3d_minf(ui.brush_drag.anchor.z, ui.brush_drag.current.z));
+        r3d_vec3 hi = r3d_v3(r3d_maxf(ui.brush_drag.anchor.x, ui.brush_drag.current.x), ui.brush_drag.base + height, r3d_maxf(ui.brush_drag.anchor.z, ui.brush_drag.current.z));
+        if (hi.x - lo.x < step * 0.5f) hi.x = lo.x + step;
+        if (hi.z - lo.z < step * 0.5f) hi.z = lo.z + step;
+        r3d_draw_box_outline(lo, hi, yellow3);
+        if (ui.brush_shape == 1) {   /* the ramp's slope */
+            int axis = hi.x - lo.x >= hi.z - lo.z ? 0 : 2;
+            float sign = (axis == 0 ? ui.brush_drag.current.x - ui.brush_drag.anchor.x : ui.brush_drag.current.z - ui.brush_drag.anchor.z) >= 0 ? 1.0f : -1.0f;
+            r3d_vec3 near_lo = lo, near_hi = hi, far_lo = lo, far_hi = hi;
+            (&near_hi.x)[axis] = (&near_lo.x)[axis] = sign > 0 ? (&lo.x)[axis] : (&hi.x)[axis];
+            (&far_hi.x)[axis] = (&far_lo.x)[axis] = sign > 0 ? (&hi.x)[axis] : (&lo.x)[axis];
+            int other = axis == 0 ? 2 : 0;
+            for (int side = 0; side < 2; ++side) {
+                r3d_vec3 a = near_lo, b = far_hi;
+                (&a.x)[other] = (&b.x)[other] = side ? (&hi.x)[other] : (&lo.x)[other];
+                a.y = lo.y; b.y = hi.y;
+                r3d_draw_line_overlay(a, b, yellow3);
+            }
+        }
+        r2d_draw_textf(r2d_add(r2d_mouse(), r2d_v2(16, 8)), yellow, "%s %.2g x %.2g x %.2g", ui.brush_shape == 1 ? "wedge" : "brush", (double)(hi.x - lo.x), (double)(hi.y - lo.y), (double)(hi.z - lo.z));
+    }
+    if (ui.tool == TOOL_CLIP) {
+        for (int i = 0; i < ui.clip.count; ++i) {
+            r3d_vec3 p = ui.clip.points[i];
+            float k = r3d_px_at(p, 6);
+            for (int a = 0; a < 3; ++a) r3d_draw_line_overlay(r3d_sub(p, r3d_scale(unit_axis(a), k)), r3d_add(p, r3d_scale(unit_axis(a), k)), yellow3);
+        }
+        float n[3], dist;
+        if (clip_plane(n, &dist)) {
+            /* the plane as a square around the points, and the kept side's arrow */
+            r3d_vec3 normal = r3d_v3(n[0], n[1], n[2]), c = r3d_scale(r3d_add(ui.clip.points[0], ui.clip.points[1]), 0.5f);
+            r3d_vec3 b1 = r3d_normalize(r3d_cross(normal, fabsf(normal.y) < 0.9f ? r3d_v3(0, 1, 0) : r3d_v3(1, 0, 0))), b2 = r3d_cross(normal, b1);
+            float size = 3;
+            if (d->selection_count) {
+                float lo[3], hi[3];
+                if (ed_brush_bounds(d, ed_primary(d), lo, hi)) size = r3d_maxf(size, r3d_length(r3d_v3(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2])));
+            }
+            r3d_color pc = r3d_rgba(255, 140, 60, 230);
+            r3d_vec3 q[4];
+            for (int i = 0; i < 4; ++i) q[i] = r3d_add(c, r3d_add(r3d_scale(b1, (i & 1) ? size : -size), r3d_scale(b2, (i & 2) ? size : -size)));
+            r3d_draw_line_overlay(q[0], q[1], pc); r3d_draw_line_overlay(q[1], q[3], pc); r3d_draw_line_overlay(q[3], q[2], pc); r3d_draw_line_overlay(q[2], q[0], pc);
+            r3d_draw_line_overlay(q[0], q[3], r3d_with_alpha(pc, 90)); r3d_draw_line_overlay(q[1], q[2], r3d_with_alpha(pc, 90));
+            if (ui.clip.keep != ED_CLIP_KEEP_BACK) r3d_draw_line_overlay(c, r3d_add(c, r3d_scale(normal, size * 0.4f)), r3d_rgb(120, 255, 120));
+            if (ui.clip.keep != ED_CLIP_KEEP_FRONT) r3d_draw_line_overlay(c, r3d_sub(c, r3d_scale(normal, size * 0.4f)), r3d_rgb(120, 255, 120));
+        }
+        static const char *const keep_names[3] = {"keep back", "keep front", "keep both"};
+        r2d_draw_textf(r2d_add(r2d_mouse(), r2d_v2(16, 8)), yellow, "clip: %d point%s, %s (Tab), Enter cuts the selection", ui.clip.count, ui.clip.count == 1 ? "" : "s", keep_names[ui.clip.keep]);
+    }
+    if (ui.tool == TOOL_VERTEX) {
+        /* the selected brushes' corners; the hovered or dragged one in yellow */
+        for (size_t i = 0; i < d->selection_count; ++i) {
+            cw_entity_id id = d->selection[i];
+            float verts[CW_BRUSH_MAX_FACES * 3][3], c[3];
+            if (!ed_is_brush(d, id) || !cw_reflect_position3(&d->gw.world, id, &c[0], &c[1], &c[2])) continue;
+            int n = cw_brush_vertices(cw_comp_ptr(&d->gw.world, id, d->gw.brush_ct), c, verts, CW_BRUSH_MAX_FACES * 3);
+            for (int k = 0; k < n; ++k) {
+                r3d_vec3 p = r3d_v3(verts[k][0], verts[k][1], verts[k][2]);
+                bool hot = ui.vertex.active ? (id == ui.vertex.id && r3d_length(r3d_sub(p, ui.vertex.current)) < 1e-4f) : (id == ui.vertex.hover_id && k == ui.vertex.hover_index);
+                float half = r3d_px_at(p, hot ? 5 : 3.5f);
+                r3d_color col = hot ? yellow3 : r3d_rgb(120, 200, 255);
+                /* a small screen-facing square */
+                r3d_vec3 right = r3d_camera_right(r3d_camera_ptr()), up = r3d_camera_up(r3d_camera_ptr());
+                r3d_vec3 q[4] = {r3d_add(p, r3d_add(r3d_scale(right, -half), r3d_scale(up, -half))), r3d_add(p, r3d_add(r3d_scale(right, half), r3d_scale(up, -half))),
+                                 r3d_add(p, r3d_add(r3d_scale(right, half), r3d_scale(up, half))), r3d_add(p, r3d_add(r3d_scale(right, -half), r3d_scale(up, half)))};
+                for (int e = 0; e < 4; ++e) r3d_draw_line_overlay(q[e], q[(e + 1) % 4], col);
+                if (hot) { r3d_draw_line_overlay(q[0], q[2], col); r3d_draw_line_overlay(q[1], q[3], col); }
+            }
+        }
+        if (ui.vertex.active) r2d_draw_textf(r2d_add(r2d_mouse(), r2d_v2(16, 8)), yellow, "vertex %.2f, %.2f, %.2f", (double)ui.vertex.current.x, (double)ui.vertex.current.y, (double)ui.vertex.current.z);
+        else if (!d->selection_count) r2d_draw_textf(r2d_add(r2d_mouse(), r2d_v2(16, 8)), yellow, "vertex tool: click a brush, then drag its corners (alt: level)");
+    }
+    if (ui.tool == TOOL_DECAL && !r2d_mouse_over_ui() && r2d_rect_contains(world_area(), r2d_mouse())) {
+        /* where the decal would go: its square on the surface under the mouse */
+        r3d_pick_hit hit;
+        r3d_ray ray = r3d_screen_ray(r2d_mouse().x, r2d_mouse().y);
+        r3d_vec3 p, n = r3d_v3(0, 1, 0);
+        bool on = pick_surface(ray, &hit);
+        if (on) { p = hit.point; if (r3d_length(hit.normal) > 0.5f) n = hit.normal; }
+        else on = r3d_ray_ground(ray, 0, &p);
+        if (on) {
+            float size = ui.decal_size > 0 ? ui.decal_size : 1;
+            r3d_vec3 b1 = r3d_normalize(r3d_cross(n, fabsf(n.y) < 0.9f ? r3d_v3(0, 1, 0) : r3d_v3(1, 0, 0))), b2 = r3d_cross(n, b1);
+            r3d_vec3 q[4];
+            for (int i = 0; i < 4; ++i) q[i] = r3d_add(p, r3d_add(r3d_scale(b1, ((i == 1 || i == 2) ? 0.5f : -0.5f) * size), r3d_scale(b2, (i >= 2 ? 0.5f : -0.5f) * size)));
+            for (int i = 0; i < 4; ++i) r3d_draw_line_overlay(q[i], q[(i + 1) % 4], yellow3);
+            r3d_draw_line_overlay(p, r3d_add(p, r3d_scale(n, size * 0.5f)), yellow3);
+            r2d_draw_textf(r2d_add(r2d_mouse(), r2d_v2(16, 8)), yellow, "decal %.2g (%s)", (double)size, ui.material_open && ui.material_asset ? "material panel's material" : "no material: pick one");
+        }
+    }
+    if (ui.tool == TOOL_PAINT && !r2d_mouse_over_ui() && r2d_rect_contains(world_area(), r2d_mouse())) {
+        r3d_pick_hit hit;
+        if (pick_surface(r3d_screen_ray(r2d_mouse().x, r2d_mouse().y), &hit)) {
+            r3d_vec3 n = r3d_length(hit.normal) > 0.5f ? hit.normal : r3d_v3(0, 1, 0);
+            r3d_vec3 b1 = r3d_normalize(r3d_cross(n, fabsf(n.y) < 0.9f ? r3d_v3(0, 1, 0) : r3d_v3(1, 0, 0))), b2 = r3d_cross(n, b1);
+            r3d_color c = r3d_rgb(ui.paint.rgb[0], ui.paint.rgb[1], ui.paint.rgb[2]);
+            for (int i = 0; i < 32; ++i) {
+                float t0 = 2 * R3D_PI * (float)i / 32, t1 = 2 * R3D_PI * (float)(i + 1) / 32;
+                r3d_draw_line_overlay(r3d_add(hit.point, r3d_add(r3d_scale(b1, cosf(t0) * ui.paint.radius), r3d_scale(b2, sinf(t0) * ui.paint.radius))),
+                                      r3d_add(hit.point, r3d_add(r3d_scale(b1, cosf(t1) * ui.paint.radius), r3d_scale(b2, sinf(t1) * ui.paint.radius))), c);
+            }
+            r3d_draw_line_overlay(hit.point, r3d_add(hit.point, r3d_scale(n, ui.paint.radius * 0.5f)), c);
+        }
+    }
+    /* lights: their direction and colour */
+    if (d->world_ready && d->gw.light3d_ct != CW_INVALID_COMPONENT) {
+        cw_world *w = &d->gw.world;
+        cw_query q = cw_query_iter(w, cw_mask(&d->gw.light3d_ct, 1));
+        cw_entity_id id;
+        while (cw_query_next(&q, &id)) {
+            float x = 0, y = 0, z = 0;
+            cw_reflect_position3(w, id, &x, &y, &z);
+            cw_canvas_light3d l;
+            cw_light3d_to_canvas(cw_comp_ptr(w, id, d->gw.light3d_ct), x, y, z, id, &l);
+            r3d_vec3 p = r3d_v3(x, y, z), dir = r3d_v3(l.dx, l.dy, l.dz);
+            r3d_color c = r3d_rgb(l.color.r, l.color.g, l.color.b);
+            float k = r3d_px_at(p, 10);
+            if (l.kind == CW_LIGHT_DIRECTIONAL || l.kind == CW_LIGHT_SPOT) {
+                float len = l.kind == CW_LIGHT_SPOT ? (l.range > 0 ? l.range * 0.5f : 2) : k * 4;
+                r3d_vec3 tip = r3d_add(p, r3d_scale(dir, len));
+                r3d_draw_line_overlay(p, tip, c);
+                if (l.kind == CW_LIGHT_SPOT) {   /* the cone */
+                    r3d_vec3 b1 = r3d_normalize(r3d_cross(dir, fabsf(dir.y) < 0.9f ? r3d_v3(0, 1, 0) : r3d_v3(1, 0, 0))), b2 = r3d_cross(dir, b1);
+                    float radius = tanf(l.cone * 0.5f) * len;
+                    for (int i = 0; i < 4; ++i) {
+                        float t = R3D_PI * 0.5f * (float)i;
+                        r3d_draw_line_overlay(p, r3d_add(tip, r3d_add(r3d_scale(b1, cosf(t) * radius), r3d_scale(b2, sinf(t) * radius))), r3d_with_alpha(c, 140));
+                    }
+                }
+            } else {   /* a little star */
+                for (int a = 0; a < 3; ++a) r3d_draw_line_overlay(r3d_sub(p, r3d_scale(unit_axis(a), k * 1.8f)), r3d_add(p, r3d_scale(unit_axis(a), k * 1.8f)), c);
+            }
+        }
+    }
+}
+
+/* The 3D viewport: the module's Shape3D primitives through render3d, the
+ * editor's grid, axes and selection outlines in the same image, labels and
+ * the tool cursor over it through render2d's screen space. */
+static void draw_world3d(void) {
+    ed_document *d = &ui.doc;
+    r2d_rect area = world_area();
+    r2d_set_space(R2D_SPACE_WORLD);
+    host_canvas_begin(&ui.canvas);
+    ui.canvas.lights = false;
+    r2d_post_set_bypass(!ui.lights);
+    ui.view3d.grid = ui.grid;
+    ui.view3d.axes = ui.grid;
+    ui.view3d.grid_spacing = ui.prefs.grid_spacing_3d > 0 ? ui.prefs.grid_spacing_3d : 1;
+    d->texture_lock = ui.prefs.texture_lock;   /* the preference (the palette button toggles both) */
+    host_view3d_begin(&ui.view3d, area);
+    if (!d->world_ready) return;
+    ed_ui_layout(d, game_screen());
+    cw_draw_context ctx = {cw_game_world_alpha(&d->gw), ui.time, !d->playing, d->paused || !d->playing};
+    cw_game_world_draw(&d->gw, &ui.canvas.canvas, &ctx);
+    /* outlines around the selected and hovered shapes; a small wire marker for positioned entities without one */
+    cw_entity_id ids[4096];
+    size_t n = ed_entities(d, ids, 4096);
+    cw_entity_id labelled = CW_INVALID_ENTITY;
+    for (size_t i = 0; i < n; ++i) {
+        cw_entity_id id = ids[i];
+        if (ed_is_ui(d, id)) continue;
+        bool selected = ed_is_selected(d, id), hover = ui.hovered == (uint64_t)id;
+        const cw_canvas_shape3d *shape = host_canvas_find_shape(&ui.canvas, id);
+        r3d_primitive p;
+        if (ed_is_brush(d, id)) {   /* a brush: the edges of its faces */
+            if (selected) draw_brush_outline(id, r3d_rgba(yellow.r, yellow.g, yellow.b, 255));
+            else if (hover) draw_brush_outline(id, r3d_rgba(255, 255, 255, 170));
+            if (selected && ui.face_sel.id == id && ui.face_sel.face >= 0) {   /* the selected face, filled-ish: its polygon edges in cyan */
+                const cw_brush *b = cw_comp_ptr(&d->gw.world, id, d->gw.brush_ct);
+                float c[3];
+                cw_brush_polygon poly;
+                if (cw_reflect_position3(&d->gw.world, id, &c[0], &c[1], &c[2]) && cw_brush_face_polygon(b, c, ui.face_sel.face, &poly))
+                    for (int k = 0; k < poly.count; ++k) {
+                        const float *a = poly.p[k], *e = poly.p[(k + 1) % poly.count];
+                        r3d_draw_line_overlay(r3d_v3(a[0], a[1], a[2]), r3d_v3(e[0], e[1], e[2]), r3d_rgb(120, 220, 240));
+                        r3d_draw_line_overlay(r3d_v3(a[0], a[1], a[2]), r3d_v3(poly.p[0][0], poly.p[0][1], poly.p[0][2]), r3d_rgba(120, 220, 240, 70));
+                    }
+            }
+            if (hover || (selected && id == ed_primary(d))) labelled = id;
+            continue;
+        }
+        const cw_canvas_decal3d *decal = shape ? NULL : host_canvas_find_decal(&ui.canvas, id);
+        if (decal) {   /* a decal: its box and projection arrow, faint when neither selected nor hovered (while editing) */
+            r3d_decal dc = host_canvas_decal(&ui.canvas, decal);
+            r3d_color c = selected ? r3d_rgba(yellow.r, yellow.g, yellow.b, 255) : (hover ? r3d_rgba(255, 255, 255, 170) : r3d_rgba(255, 170, 90, d->playing ? 0 : 90));
+            if (c.a) {
+                r3d_vec3 k[8];
+                r3d_decal_corners(&dc, k);
+                static const int edges[12][2] = {{0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7}, {7, 6}, {6, 4}, {0, 4}, {1, 5}, {3, 7}, {2, 6}};
+                for (int e = 0; e < 12; ++e) r3d_draw_line_overlay(k[edges[e][0]], k[edges[e][1]], c);
+                r3d_mat4 rot = r3d_mat4_rotation(dc.rotation);
+                r3d_vec3 up = r3d_mat4_transform_vector(&rot, r3d_v3(0, 1, 0));
+                r3d_draw_line_overlay(r3d_add(dc.position, r3d_scale(up, dc.size.y * 0.5f)), r3d_sub(dc.position, r3d_scale(up, dc.size.y * 0.5f)), c);   /* the projection axis */
+            }
+            if (hover || (selected && id == ed_primary(d))) labelled = id;
+            continue;
+        }
+        if (shape) p = host_view3d_primitive(shape);
+        else {
+            float x, y, z;
+            if (!cw_reflect_position3(&d->gw.world, id, &x, &y, &z)) continue;
+            float r = r3d_px_at(r3d_v3(x, y, z), 10);
+            p = r3d_primitive_make(R3D_SPHERE, r3d_v3(x, y, z), r3d_v3(r, r, r), r3d_rgba(200, 200, 220, 180));
+            p.wireframe = true;
+            p.id = (uint64_t)id;
+            r3d_draw_primitive(&p);
+        }
+        if (selected) r3d_draw_outline(&p, r3d_rgba(yellow.r, yellow.g, yellow.b, 255));
+        else if (hover) r3d_draw_outline(&p, r3d_rgba(255, 255, 255, 170));
+        if (hover || (selected && id == ed_primary(d))) labelled = id;
+    }
+    if (ui.tool == TOOL_SELECT && !d->playing) draw_gizmo();
+    draw_level_tools();
+    r2d_set_space(R2D_SPACE_SCREEN);
+    if (labelled != CW_INVALID_ENTITY) {
+        float x, y, z, sx, sy;
+        if (cw_reflect_position3(&d->gw.world, labelled, &x, &y, &z) && r3d_world_to_screen(r3d_v3(x, y, z), &sx, &sy) && r2d_rect_contains(area, r2d_v2(sx, sy))) {
+            char label[96], name[64];
+            ed_label(d, labelled, name, sizeof(name));
+            snprintf(label, sizeof(label), "#%" PRId64 " %s  (%.2f, %.2f, %.2f)", labelled, name, (double)x, (double)y, (double)z);
+            r2d_draw_text(r2d_v2(sx + 12, sy - r2d_text_height() - 8), r2d_with_alpha(white, 220), label);
+        }
+    }
+    /* the tool cursor: where the mouse meets the ground */
+    r3d_vec3 g;
+    if ((ui.tool == TOOL_PLACE || ui.tool == TOOL_PREFAB || ui.tool == TOOL_CREATE) && !r2d_mouse_over_ui() && r2d_rect_contains(area, r2d_mouse()) && host_view3d_ground_point(&ui.view3d, r2d_mouse(), 0, &g)) {
+        float gx = ed_settings_snap_3d(&ui.prefs, g.x), gz = ed_settings_snap_3d(&ui.prefs, g.z);
+        float r = r3d_px_at(r3d_v3(gx, 0, gz), 14);
+        r3d_color c = r3d_rgba(yellow.r, yellow.g, yellow.b, 220);
+        r3d_draw_line_overlay(r3d_v3(gx - r, 0, gz), r3d_v3(gx + r, 0, gz), c);
+        r3d_draw_line_overlay(r3d_v3(gx, 0, gz - r), r3d_v3(gx, 0, gz + r), c);
+        r3d_draw_line_overlay(r3d_v3(gx, 0, gz), r3d_v3(gx, r, gz), c);
+        r2d_vec2 m = r2d_mouse();
+        if (ui.tool == TOOL_PLACE) {
+            const cw_prefab *p = &d->gw.module->prefabs[ui.prefab];
+            r2d_draw_textf(r2d_add(m, r2d_v2(16, 8)), yellow, "%s %s  (%.1f, %.1f)", p->category ? p->category : "", p->name, (double)gx, (double)gz);
+        } else if (ui.tool == TOOL_PREFAB) {
+            const cw_asset *a = cw_assets_find(&d->assets, ui.prefab_asset);
+            r2d_draw_textf(r2d_add(m, r2d_v2(16, 8)), yellow, "prefab %s  (%.1f, %.1f)", a ? a->name : "?", (double)gx, (double)gz);
+        } else r2d_draw_textf(r2d_add(m, r2d_v2(16, 8)), yellow, "new entity  (%.1f, %.1f)", (double)gx, (double)gz);
+    }
+    /* the camera, for orientation */
+    const r3d_camera *cam = r3d_camera_ptr();
+    static const char *const view_names[R3D_VIEW_MODES] = {"", "  view: normals (shift-V)", "  view: uv (shift-V)"};
+    static const char *const gizmo_names[3] = {"move (W)", "rotate (R)", "scale (S)"};
+    static const char *const tool_names[] = {"select", "place", "prefab", "create", "brush (B)", "paint (P)", "texture (T)", "clip (C)", "vertex (V)", "decal (D)"};
+    r2d_draw_textf(r2d_v2(area.x + 8, area.y + area.h - r2d_text_height() - 6), r2d_rgba(200, 205, 215, 150),
+                   "3D %s  %s  gizmo: %s  target %.1f, %.1f, %.1f  distance %.1f  yaw %.0f  pitch %.0f%s", host_view3d_orthographic(&ui.view3d) ? "ortho" : "persp", tool_names[ui.tool], gizmo_names[ui.gizmo_mode],
+                   (double)cam->target.x, (double)cam->target.y, (double)cam->target.z, (double)r3d_camera_distance(cam),
+                   (double)(r3d_camera_yaw(cam) * 180 / R3D_PI), (double)(r3d_camera_pitch(cam) * 180 / R3D_PI), view_names[r3d_view_mode_get()]);
+}
 static void draw_world(void) {
+    host_canvas_set_view3d(&ui.canvas, is_3d() ? &ui.view3d : NULL);
+    r2d_set_camera_controls(!is_3d());   /* in 3D the view has the right and middle buttons and the wheel */
+    if (is_3d()) { draw_world3d(); return; }
     r2d_set_space(R2D_SPACE_WORLD);
     r2d_rect b = level_bounds();
     host_canvas_begin(&ui.canvas);
@@ -399,8 +1224,89 @@ static void draw_world(void) {
         } else r2d_draw_text(r2d_add(m, r2d_v2(r2d_px(16), r2d_px(8))), yellow, "new entity");
     }
 }
+/* Selection, drags and placement in the 3D viewport. Picking is exact (ray
+ * casts against the primitives drawn this frame); drags move the selection
+ * over the horizontal plane through the grabbed entity. */
+static void handle_world_input3d(void) {
+    ed_document *d = &ui.doc;
+    r2d_rect area = world_area();
+    r2d_vec2 m = r2d_mouse();
+    bool in_viewport = r2d_rect_contains(area, m) && !r2d_mouse_over_ui();
+    bool ui_owns_mouse = handle_ui_input();
+    bool blocked = hui_focused() || ui_owns_mouse;
+    host_view3d_controls(&ui.view3d, !blocked);
+    if (!d->playing && gizmo_input(m, in_viewport, blocked)) { ui.hovered = R3D_ID_NONE; return; }
+    if (level_tools_input(m, in_viewport, blocked)) { ui.hovered = R3D_ID_NONE; return; }
+    uint64_t hit = in_viewport && !blocked && ui.drag3d.mode != 3 && ui.gizmo.hover_kind == DRAG3D_NONE ? r3d_pick_at(m.x, m.y) : R3D_ID_NONE;
+    ui.hovered = hit;
+    bool additive = (r2d_modifiers() & (SAPP_MODIFIER_SHIFT | SAPP_MODIFIER_CTRL)) != 0;
+    if (ui.tool == TOOL_SELECT) {
+        if (ui.drag3d.mode == 0 && r2d_mouse_pressed(R2D_MOUSE_LEFT) && in_viewport && !blocked) {
+            ui.drag3d.moved = false;
+            ui.drag3d.press = m;
+            if (hit != R3D_ID_NONE) {
+                cw_entity_id id = (cw_entity_id)hit;
+                if (additive) ed_select_toggle(d, id);
+                else if (!ed_is_selected(d, id)) ed_select_set(d, id);
+                selection_to_r2d();
+                if (ed_is_brush(d, id)) {
+                    r3d_pick_hit h;
+                    if (r3d_pick(r3d_screen_ray(m.x, m.y), &h) && h.id == hit) { ui.face_sel.id = id; ui.face_sel.face = brush_face_hit(id, h.point); }
+                }
+                float x, y, z;
+                ui.drag3d.plane_y = cw_reflect_position3(&d->gw.world, id, &x, &y, &z) ? y : 0;
+                ui.drag3d.id = id;
+                ui.drag3d.mode = host_view3d_ground_point(&ui.view3d, m, ui.drag3d.plane_y, &ui.drag3d.last) && ed_is_selected(d, id) ? 1 : 0;
+            } else ui.drag3d.mode = 2;
+        }
+        if (ui.drag3d.mode == 1 && r2d_mouse_down(R2D_MOUSE_LEFT) && r2d_distance(m, ui.drag3d.press) > 4) ui.drag3d.mode = 3;   /* a press becomes a drag */
+        if (ui.drag3d.mode == 3 && r2d_mouse_down(R2D_MOUSE_LEFT)) {
+            r3d_vec3 now;
+            if (host_view3d_ground_point(&ui.view3d, m, ui.drag3d.plane_y, &now)) {
+                r3d_vec3 delta = r3d_sub(now, ui.drag3d.last);
+                ed_move_selection3(d, delta.x, 0, delta.z);
+                ui.drag3d.last = now;
+                ui.drag3d.moved = true;
+            }
+        }
+        if (ui.drag3d.mode != 0 && !r2d_mouse_down(R2D_MOUSE_LEFT)) {
+            if (ui.drag3d.mode == 3 && ui.drag3d.moved) {
+                if (ui.prefs.snap)
+                    for (size_t i = 0; i < d->selection_count; ++i) {
+                        float x, y, z;
+                        if (cw_reflect_position3(&d->gw.world, d->selection[i], &x, &y, &z))
+                            cw_reflect_set_position3(&d->gw.world, d->selection[i], ed_settings_snap_3d(&ui.prefs, x), y, ed_settings_snap_3d(&ui.prefs, z));
+                    }
+                ed_commit(d, "move");
+                ed_status(d, false, "moved %zu entit%s", d->selection_count, d->selection_count == 1 ? "y" : "ies");
+            } else if (ui.drag3d.mode == 1 && !additive && d->selection_count > 1) {
+                ed_select_set(d, ui.drag3d.id);   /* a plain click on one of several selected picks it alone */
+                selection_to_r2d();
+            } else if (ui.drag3d.mode == 2 && !additive && in_viewport && d->selection_count) {
+                ed_select_clear(d);
+                selection_to_r2d();
+            }
+            ui.drag3d.mode = 0;
+        }
+    } else if (ui.tool == TOOL_PLACE || ui.tool == TOOL_PREFAB || ui.tool == TOOL_CREATE) {
+        if (r2d_mouse_pressed(R2D_MOUSE_LEFT) && in_viewport && !blocked) {
+            r3d_vec3 g;
+            if (host_view3d_ground_point(&ui.view3d, m, 0, &g)) {
+                float x = ed_settings_snap_3d(&ui.prefs, g.x), z = ed_settings_snap_3d(&ui.prefs, g.z);
+                /* prefab spawns take the ground coordinates in their (x, y) arguments */
+                if (ui.tool == TOOL_PLACE) ed_place(d, ui.prefab, x, z);
+                else if (ui.tool == TOOL_PREFAB) ed_place_prefab(d, ui.prefab_asset, x, z);
+                else ed_create_entity3(d, x, 0, z);
+                selection_to_r2d();
+                if (!(r2d_modifiers() & SAPP_MODIFIER_SHIFT)) ui.tool = TOOL_SELECT;
+            } else ed_status(d, true, "the mouse does not meet the ground there");
+        }
+        if (r2d_mouse_pressed(R2D_MOUSE_RIGHT) && in_viewport) ui.tool = TOOL_SELECT;
+    }
+}
 static void handle_world_input(void) {
     if (!ui.doc.world_ready) return;
+    if (is_3d()) { handle_world_input3d(); return; }
     bool in_viewport = r2d_rect_contains(world_area(), r2d_mouse()) && !r2d_mouse_over_ui();
     bool ui_owns_mouse = handle_ui_input();
     r2d_selection_result sel;
@@ -557,6 +1463,10 @@ static void draw_toolbar(void) {
     if (TB("run", 42, false, ready)) ed_run_player(d);
     x += 8;
     if (TB("fit", 40, false, true)) fit_view();
+    if (TB(ed_is_3d(d) ? "3D" : "2D", 34, ed_is_3d(d), d->project_open && ui.view3d.ready)) {   /* the project's renderer key: how it is viewed and played */
+        if (ed_set_renderer(d, ed_is_3d(d) ? CW_RENDERER_2D : CW_RENDERER_3D)) { ui.tool = TOOL_SELECT; selection_to_r2d(); fit_view(); }
+    }
+    if (is_3d() && TB(host_view3d_orthographic(&ui.view3d) ? "ortho" : "persp", 50, host_view3d_orthographic(&ui.view3d), true)) host_view3d_set_orthographic(&ui.view3d, !host_view3d_orthographic(&ui.view3d));
     if (TB("grid", 46, ui.grid, true)) ui.grid = !ui.grid;
     if (TB("lights", 56, ui.lights, true)) ui.lights = !ui.lights;
     {
@@ -608,6 +1518,116 @@ static void draw_palette(Layout *l) {
     l->y += r2d_text_height() + 3;
     r = row(l, ROW_H);
     if (button(r, "E  new empty entity", ui.tool == TOOL_CREATE)) ui.tool = TOOL_CREATE;
+    if (is_3d()) {
+        /* the level tools and the gizmo */
+        l->y += 2;
+        r2d_ui_label_dim(r2d_v2(l->x, l->y), "level (quake-style brushes)");
+        l->y += r2d_text_height() + 3;
+        line = row(l, ROW_H);
+        if (button(split(line, 0, 2), "B  brush", ui.tool == TOOL_BRUSH)) ui.tool = ui.tool == TOOL_BRUSH ? TOOL_SELECT : TOOL_BRUSH;
+        if (button(split(line, 1, 2), "T  texture", ui.tool == TOOL_TEXTURE)) ui.tool = ui.tool == TOOL_TEXTURE ? TOOL_SELECT : TOOL_TEXTURE;
+        line = row(l, ROW_H);
+        if (button(split(line, 0, 2), "P  paint", ui.tool == TOOL_PAINT)) ui.tool = ui.tool == TOOL_PAINT ? TOOL_SELECT : TOOL_PAINT;
+        if (button(split(line, 1, 2), "C  clip", ui.tool == TOOL_CLIP)) { ui.tool = ui.tool == TOOL_CLIP ? TOOL_SELECT : TOOL_CLIP; ui.clip.count = 0; }
+        line = row(l, ROW_H);
+        if (button(split(line, 0, 2), "V  vertex", ui.tool == TOOL_VERTEX)) ui.tool = ui.tool == TOOL_VERTEX ? TOOL_SELECT : TOOL_VERTEX;
+        if (button(split(line, 1, 2), "D  decal", ui.tool == TOOL_DECAL)) ui.tool = ui.tool == TOOL_DECAL ? TOOL_SELECT : TOOL_DECAL;
+        if (ui.tool == TOOL_DECAL) {
+            static char dbuf[2][16];
+            if (ui.decal_size <= 0) ui.decal_size = 1;
+            if (ui.decal_depth <= 0) ui.decal_depth = 0.5f;
+            draw_number(l, "decal size", &ui.decal_size, 0.05f, 100, 0.25f, &dbuf[0], dbuf[0], sizeof(dbuf[0]));
+            draw_number(l, "projection depth", &ui.decal_depth, 0.05f, 100, 0.25f, &dbuf[1], dbuf[1], sizeof(dbuf[1]));
+            label_line(l, r2d_rgb(150, 155, 165), "click a surface: the decal faces it");
+        }
+        line = row(l, ROW_H);
+        if (button(split(line, 0, 2), ui.doc.texture_lock ? "lock: on" : "lock: off", ui.doc.texture_lock)) {
+            ui.doc.texture_lock = ui.prefs.texture_lock = !ui.doc.texture_lock;
+            ed_status(&ui.doc, false, ui.doc.texture_lock ? "textures stay on their faces when brushes move" : "textures stay in world space when brushes move");
+        }
+        /* CSG and the grid: on the selected brushes */
+        line = row(l, ROW_H);
+        if (button(split(line, 0, 2), "subtract", false)) {
+            size_t pieces = ed_csg_subtract(&ui.doc);
+            if (pieces) { ed_status(&ui.doc, false, "carved: %zu piece%s", pieces, pieces == 1 ? "" : "s"); selection_to_r2d(); }
+        }
+        if (button(split(line, 1, 2), "hollow", false)) {
+            size_t pieces = ed_csg_hollow(&ui.doc, ui.hollow_thickness > 0 ? ui.hollow_thickness : 0.25f);
+            if (pieces) { ed_status(&ui.doc, false, "hollowed into %zu wall%s", pieces, pieces == 1 ? "" : "s"); selection_to_r2d(); }
+        }
+        if (button(row(l, ROW_H), "snap brushes to grid", false)) {
+            size_t moved = ed_snap_brushes(&ui.doc, ui.prefs.grid_spacing_3d > 0 ? ui.prefs.grid_spacing_3d : 1);
+            ed_status(&ui.doc, false, moved ? "%zu brush%s snapped to the grid" : "the selected brushes were on the grid already", moved, moved == 1 ? "" : "es");
+        }
+        {
+            static char hollow_buf[16];
+            if (ui.hollow_thickness <= 0) ui.hollow_thickness = 0.25f;
+            draw_number(l, "wall thickness", &ui.hollow_thickness, 0.01f, 100, 0.05f, &hollow_buf, hollow_buf, sizeof(hollow_buf));
+        }
+        if (ui.tool == TOOL_BRUSH) {
+            line = row(l, ROW_H);
+            if (button(split(line, 0, 2), "box", ui.brush_shape == 0)) ui.brush_shape = 0;
+            if (button(split(line, 1, 2), "wedge", ui.brush_shape == 1)) ui.brush_shape = 1;
+        }
+        if (ui.tool == TOOL_CLIP) {
+            static const char *const keep_names[3] = {"keep back", "keep front", "keep both"};
+            char text[96];
+            snprintf(text, sizeof(text), "%d point%s; %s (Tab)", ui.clip.count, ui.clip.count == 1 ? "" : "s", keep_names[ui.clip.keep]);
+            label_line(l, r2d_rgb(150, 155, 165), text);
+            label_line(l, r2d_rgb(150, 155, 165), "click 2-3 points on faces, Enter cuts");
+            line = row(l, ROW_H);
+            if (button(split(line, 0, 2), "cut (Enter)", ui.clip.count >= 2)) clip_apply();
+            if (button(split(line, 1, 2), "clear", false)) ui.clip.count = 0;
+        }
+        l->y += 2;
+        r2d_ui_label_dim(r2d_v2(l->x, l->y), "gizmo (W / R / S)");
+        l->y += r2d_text_height() + 3;
+        line = row(l, ROW_H);
+        if (button(split(line, 0, 3), "move", ui.gizmo_mode == GIZMO_MOVE)) ui.gizmo_mode = GIZMO_MOVE;
+        if (button(split(line, 1, 3), "rotate", ui.gizmo_mode == GIZMO_ROTATE)) ui.gizmo_mode = GIZMO_ROTATE;
+        if (button(split(line, 2, 3), "scale", ui.gizmo_mode == GIZMO_SCALE)) ui.gizmo_mode = GIZMO_SCALE;
+        /* the camera: a projection and a direction (numpad 5 toggles, 7 / 1 / 3 look down / from the front / from the right) */
+        l->y += 2;
+        r2d_ui_label_dim(r2d_v2(l->x, l->y), host_view3d_orthographic(&ui.view3d) ? "camera: orthographic (O)" : "camera: perspective (O)");
+        l->y += r2d_text_height() + 3;
+        for (int v = 0; v < HOST_VIEW_PRESETS; ++v) {
+            if (v % 2 == 0) line = row(l, ROW_H);
+            if (button(split(line, v % 2, 2), host_view3d_preset_name((host_view3d_preset)v), false)) host_view3d_look(&ui.view3d, (host_view3d_preset)v);
+        }
+        if (ui.tool == TOOL_PAINT) {
+            /* the paint tool's colour, radius and strength */
+            l->y += 2;
+            r2d_ui_label_dim(r2d_v2(l->x, l->y), "paint: left drag colours brush vertices");
+            l->y += r2d_text_height() + 3;
+            static const uint8_t swatches[8][3] = {{255, 255, 255}, {40, 40, 48}, {200, 60, 50}, {240, 170, 60}, {90, 170, 80}, {70, 120, 210}, {150, 90, 200}, {120, 90, 60}};
+            line = row(l, ROW_H);
+            for (int i = 0; i < 8; ++i) {
+                r2d_rect sw = split(line, i, 8);
+                bool current = memcmp(swatches[i], ui.paint.rgb, 3) == 0;
+                if (r2d_ui_button_colored(sw, "", r2d_rgb(swatches[i][0], swatches[i][1], swatches[i][2]))) memcpy(ui.paint.rgb, swatches[i], 3);
+                if (current) r2d_draw_rect_outline(sw, 2, yellow);
+            }
+            static char pbuf[5][16];
+            float rgb[3] = {ui.paint.rgb[0], ui.paint.rgb[1], ui.paint.rgb[2]};
+            draw_number(l, "red", &rgb[0], 0, 255, 5, &pbuf[0], pbuf[0], sizeof(pbuf[0]));
+            draw_number(l, "green", &rgb[1], 0, 255, 5, &pbuf[1], pbuf[1], sizeof(pbuf[1]));
+            draw_number(l, "blue", &rgb[2], 0, 255, 5, &pbuf[2], pbuf[2], sizeof(pbuf[2]));
+            for (int i = 0; i < 3; ++i) ui.paint.rgb[i] = (uint8_t)(rgb[i] < 0 ? 0 : (rgb[i] > 255 ? 255 : rgb[i] + 0.5f));
+            draw_number(l, "radius", &ui.paint.radius, 0.05f, 20, 0.25f, &pbuf[3], pbuf[3], sizeof(pbuf[3]));
+            draw_number(l, "strength", &ui.paint.strength, 0.01f, 1, 0.05f, &pbuf[4], pbuf[4], sizeof(pbuf[4]));
+            r = row(l, ROW_H);
+            if (button(r, "clear paint on the selection", false)) ed_paint_clear_selection(&ui.doc);
+        }
+        if (ui.tool == TOOL_TEXTURE || ui.tool == TOOL_BRUSH) {
+            const cw_asset *a = ui.material_open && ui.material_asset ? cw_assets_find(&ui.doc.assets, ui.material_asset) : NULL;
+            char hint[128];
+            snprintf(hint, sizeof(hint), "%s: %s", ui.tool == TOOL_TEXTURE ? "click a face (shift: all)" : "drag a footprint; faces", a ? a->name : "no material yet");
+            label_line(l, r2d_rgb(150, 155, 165), hint);
+            if (!a) label_line(l, r2d_rgb(150, 155, 165), "(pick one in the material panel)");
+            if (ui.tool == TOOL_TEXTURE) label_line(l, r2d_rgb(150, 155, 165), "arrows shift, [ ] rotate, - = scale the face");
+        }
+        if (ui.tool == TOOL_VERTEX) label_line(l, r2d_rgb(150, 155, 165), "drag a corner of a selected brush (alt: level)");
+    }
     /* interface elements: created in the game view, inside the selected element when there is one */
     l->y += 2;
     cw_entity_id parent = ed_primary(&ui.doc);
@@ -960,6 +1980,13 @@ static void draw_field(Layout *l, cw_entity_id id, cw_component_id ct, const cw_
                 if (button(r2d_rect_make(vx + (float)i * (bw + 4), r.y, bw, r.h), f->names[i], (bits >> i) & 1u)) edit_adjust(d, id, ct, f, (int)i + 1);
             break;
         }
+        case CW_FIELD_BYTES: {
+            /* opaque data (vertex paint): shown, not typed */
+            size_t n = (size_t)cw_field_get(f, value);
+            if (n) snprintf(text, sizeof(text), "%zu bytes", n); else snprintf(text, sizeof(text), "empty");
+            r2d_ui_label_dim(r2d_v2(vx, r.y + 5), text);
+            break;
+        }
         case CW_FIELD_U32:
             if (f->semantic == CW_SEM_ASSET) {
                 /* an asset reference: pick from the project's assets */
@@ -1003,10 +2030,10 @@ static void draw_field(Layout *l, cw_entity_id id, cw_component_id ct, const cw_
                 key_ids[slot] = id;
                 snprintf(buffers[slot], sizeof(buffers[slot]), "%s", text);
             }
-            if (f->semantic == CW_SEM_ANGLE && hui_focus_key() != &keys[slot])
+            if (cw_sem_is_angle(f->semantic) && hui_focus_key() != &keys[slot])
                 snprintf(buffers[slot], sizeof(buffers[slot]), "%.1f", cw_field_get(f, value) * 180.0 / 3.14159265358979);
             if (textfield(r2d_rect_make(vx, r.y, r.w - 104 - 62, r.h), &keys[slot], buffers[slot], sizeof(buffers[slot]))) {
-                if (f->semantic == CW_SEM_ANGLE) {
+                if (cw_sem_is_angle(f->semantic)) {
                     char radians[32];
                     snprintf(radians, sizeof(radians), "%.9g", atof(buffers[slot]) * 3.14159265358979 / 180.0);
                     edit_set(d, id, ct, f, radians);
@@ -1119,6 +2146,39 @@ static void panel_inspector(r2d_rect panel, void *user) {
                 } else draw_field(&l, id, ct, &t->fields[f]);
             } else l.y += ROW_H + 4;
             if (!cw_world_is_valid(w, id) || !cw_comp_has(w, id, ct)) break;
+        }
+        if (t == &cw_brush_type && cw_world_is_valid(w, id) && cw_comp_has(w, id, ct)) {
+            /* the clicked face: its texture alignment (Quake's shift, rotation and scale) */
+            const cw_brush *b = cw_comp_ptr(w, id, ct);
+            bool have_face = ui.face_sel.id == id && ui.face_sel.face >= 0 && ui.face_sel.face < cw_brush_face_count(b);
+            l.y += 4;
+            if (l.y >= top - ROW_H && l.y + ROW_H <= bottom) {
+                r2d_rect fr = row(&l, ROW_H);
+                r2d_draw_rect(fr, r2d_rgb(44, 58, 64));
+                snprintf(text, sizeof(text), "face: %s  (%d faces, %d clips)", have_face ? cw_brush_face_names[ui.face_sel.face] : "click one in the viewport", cw_brush_face_count(b), cw_brush_clip_count(b));
+                if (have_face) r2d_ui_label_colored(r2d_v2(fr.x + 4, fr.y + 5), white, text);
+                else r2d_ui_label_colored(r2d_v2(fr.x + 4, fr.y + 5), r2d_rgb(150, 155, 165), text);
+            } else l.y += ROW_H + 4;
+            if (have_face) {
+                static char fbuf[5][24];
+                cw_brush_align al, before;
+                cw_brush_face_align_get(b, ui.face_sel.face, &al);
+                before = al;
+                draw_number(&l, "shift u", &al.shift_u, -64, 64, 0.125f, &fbuf[0], fbuf[0], sizeof(fbuf[0]));
+                draw_number(&l, "shift v", &al.shift_v, -64, 64, 0.125f, &fbuf[1], fbuf[1], sizeof(fbuf[1]));
+                draw_number(&l, "rotation", &al.rotation, -360, 360, 15, &fbuf[2], fbuf[2], sizeof(fbuf[2]));
+                draw_number(&l, "scale u", &al.scale_u, 0.05f, 64, 0.25f, &fbuf[3], fbuf[3], sizeof(fbuf[3]));
+                draw_number(&l, "scale v", &al.scale_v, 0.05f, 64, 0.25f, &fbuf[4], fbuf[4], sizeof(fbuf[4]));
+                if (memcmp(&al, &before, sizeof(al)) != 0) ed_brush_set_face_align(d, id, ui.face_sel.face, &al);
+                r2d_rect br = row(&l, ROW_H);
+                if (button(split(br, 0, 2), "reset alignment", false)) { cw_brush_align def = cw_brush_align_default(); ed_brush_set_face_align(d, id, ui.face_sel.face, &def); }
+                if (button(split(br, 1, 2), cw_brush_clip_count(b) ? "remove clips" : "no clips", cw_brush_clip_count(b) > 0) && cw_brush_clip_count(b)) {
+                    cw_brush *mb = cw_comp_ptr(w, id, ct);
+                    cw_brush_clear_clips(mb);
+                    cw_comp_touch(w, id, ct);
+                    ed_commit(d, "remove clips");
+                }
+            }
         }
     }
     /* add component */
@@ -1238,6 +2298,17 @@ static void panel_project(r2d_rect panel, void *user) {
     bool window_dirty = atoi(ui.win_w) != d->project.window_width || atoi(ui.win_h) != d->project.window_height || strcmp(ui.win_title, d->project.title) != 0;
     if (button(split(r, 0, 2), window_dirty ? "save project*" : "save project", window_dirty)) save_window_settings();
     label_line(&l, r2d_rgb(150, 155, 165), "the player and exported games use these");
+    /* the renderer: how the editor views and the player draws the world */
+    r = row(&l, ROW_H);
+    r2d_ui_label(r2d_v2(r.x, r.y + 5), "viewed in");
+    r2d_rect kinds = r2d_rect_make(r.x + 118, r.y, r.w - 118, r.h);
+    for (int k = 0; k < 2; ++k) {
+        cw_renderer_kind kind = k ? CW_RENDERER_3D : CW_RENDERER_2D;
+        if (button(split(kinds, k, 2), cw_renderer_name(kind), d->project.renderer == kind) && d->project.renderer != kind && (kind == CW_RENDERER_2D || ui.view3d.ready)) {
+            if (ed_set_renderer(d, kind)) { ui.tool = TOOL_SELECT; selection_to_r2d(); fit_view(); }
+        }
+    }
+    label_line(&l, r2d_rgb(150, 155, 165), "2d: render2d's camera; 3d: render3d's view of Shape3D, Brush, Light3D, Decal3D, Sky3D");
     /* the interface canvas */
     l.y += 4;
     r2d_ui_label_dim(r2d_v2(l.x, l.y), "interface: designed for");
@@ -1816,7 +2887,7 @@ static void panel_material(r2d_rect content, void *user) {
     if (button(split(line, 2, 4), "clamp", !m->repeat)) m->repeat = false;
     if (button(split(line, 3, 4), "repeat", m->repeat)) m->repeat = true;
     /* tint, tiling, offset */
-    static char buffers[24][24];
+    static char buffers[32][24];
     static const char *const tint_labels[4] = {"tint r", "tint g", "tint b", "tint a"};
     for (int i = 0; i < 4; ++i) draw_number(&l, tint_labels[i], &m->tint[i], 0, 4, 0.05f, &buffers[i], buffers[i], sizeof(buffers[i]));
     draw_number(&l, "tiling x", &m->tiling[0], 0.01f, 64, 0.5f, &buffers[4], buffers[4], sizeof(buffers[4]));
@@ -1829,6 +2900,18 @@ static void panel_material(r2d_rect content, void *user) {
     if (count) heading(&l, "PARAMETERS");
     for (size_t i = 0; i < count && i < 16; ++i)
         draw_number(&l, params[i].label, &m->params[params[i].index][params[i].component], params[i].min, params[i].max, params[i].step, &buffers[8 + i], buffers[8 + i], sizeof(buffers[8 + i]));
+    /* the 3D surface: what render3d draws Shape3D and brush faces with */
+    heading(&l, "SURFACE (3D: Shape3D and brush faces)");
+    r = row(&l, ROW_H);
+    row_label(r, "shading");
+    line = r2d_rect_make(r.x + 110, r.y, r.w - 110, r.h);
+    if (button(split(line, 0, 2), "lit (phong)", !m->unlit)) m->unlit = false;
+    if (button(split(line, 1, 2), "unlit", m->unlit)) m->unlit = true;
+    static const char *const spec_labels[3] = {"specular r", "specular g", "specular b"}, *const emit_labels[3] = {"emissive r", "emissive g", "emissive b"};
+    for (int i = 0; i < 3; ++i) draw_number(&l, spec_labels[i], &m->specular[i], 0, 4, 0.05f, &buffers[24 + i], buffers[24 + i], sizeof(buffers[24 + i]));
+    draw_number(&l, "shininess", &m->shininess, 1, 512, 8, &buffers[27], buffers[27], sizeof(buffers[27]));
+    for (int i = 0; i < 3; ++i) draw_number(&l, emit_labels[i], &m->emissive[i], 0, 4, 0.05f, &buffers[28 + i], buffers[28 + i], sizeof(buffers[28 + i]));
+    label_line(&l, r2d_rgb(150, 155, 165), "the texture, tint, tiling and sampling above apply to surfaces too");
     hui_unclip();
     /* never scroll past the end */
     int max_scroll = (int)(l.y + (float)ui.material_scroll - bottom + 4);
@@ -1906,6 +2989,45 @@ static void handle_keys(void) {
     if (r2d_key_pressed(SAPP_KEYCODE_F11)) sapp_toggle_fullscreen();
     if (r2d_key_pressed(SAPP_KEYCODE_GRAVE_ACCENT)) { if (hd_is_open(&ui.dock, "log")) hd_close(&ui.dock, "log"); else hd_show(&ui.dock, "log"); }
     if (r2d_key_pressed(SAPP_KEYCODE_G)) ui.grid = !ui.grid;
+    if (r2d_key_pressed(SAPP_KEYCODE_V) && !ctrl && (r2d_modifiers() & SAPP_MODIFIER_SHIFT) && is_3d()) r3d_set_view_mode((r3d_view_mode)((r3d_view_mode_get() + 1) % R3D_VIEW_MODES));
+    if (is_3d() && !ctrl) {
+        if (r2d_key_pressed(SAPP_KEYCODE_W)) ui.gizmo_mode = GIZMO_MOVE;
+        if (r2d_key_pressed(SAPP_KEYCODE_R)) ui.gizmo_mode = GIZMO_ROTATE;
+        if (r2d_key_pressed(SAPP_KEYCODE_S)) ui.gizmo_mode = GIZMO_SCALE;
+        if (d->world_ready && r2d_key_pressed(SAPP_KEYCODE_B)) ui.tool = ui.tool == TOOL_BRUSH ? TOOL_SELECT : TOOL_BRUSH;
+        if (d->world_ready && r2d_key_pressed(SAPP_KEYCODE_P)) ui.tool = ui.tool == TOOL_PAINT ? TOOL_SELECT : TOOL_PAINT;
+        if (d->world_ready && r2d_key_pressed(SAPP_KEYCODE_T)) ui.tool = ui.tool == TOOL_TEXTURE ? TOOL_SELECT : TOOL_TEXTURE;
+        if (d->world_ready && r2d_key_pressed(SAPP_KEYCODE_C)) { ui.tool = ui.tool == TOOL_CLIP ? TOOL_SELECT : TOOL_CLIP; ui.clip.count = 0; }
+        if (d->world_ready && r2d_key_pressed(SAPP_KEYCODE_V) && !(r2d_modifiers() & SAPP_MODIFIER_SHIFT)) ui.tool = ui.tool == TOOL_VERTEX ? TOOL_SELECT : TOOL_VERTEX;
+        if (d->world_ready && r2d_key_pressed(SAPP_KEYCODE_D)) ui.tool = ui.tool == TOOL_DECAL ? TOOL_SELECT : TOOL_DECAL;
+        if (r2d_key_pressed(SAPP_KEYCODE_O) || r2d_key_pressed(SAPP_KEYCODE_KP_5)) host_view3d_set_orthographic(&ui.view3d, !host_view3d_orthographic(&ui.view3d));
+        if (r2d_key_pressed(SAPP_KEYCODE_KP_7)) host_view3d_look(&ui.view3d, HOST_VIEW_TOP);
+        if (r2d_key_pressed(SAPP_KEYCODE_KP_1)) host_view3d_look(&ui.view3d, HOST_VIEW_FRONT);
+        if (r2d_key_pressed(SAPP_KEYCODE_KP_3)) host_view3d_look(&ui.view3d, HOST_VIEW_RIGHT);
+        if (r2d_key_pressed(SAPP_KEYCODE_KP_0)) host_view3d_look(&ui.view3d, HOST_VIEW_FREE);
+        if (ui.tool == TOOL_CLIP && d->world_ready) {
+            if (r2d_key_pressed(SAPP_KEYCODE_TAB)) ui.clip.keep = (ed_clip_mode)((ui.clip.keep + 1) % 3);
+            if (r2d_key_pressed(SAPP_KEYCODE_ENTER) || r2d_key_pressed(SAPP_KEYCODE_KP_ENTER)) clip_apply();
+            if (r2d_key_pressed(SAPP_KEYCODE_BACKSPACE) && ui.clip.count) --ui.clip.count;
+        }
+        if (ui.tool == TOOL_TEXTURE && d->world_ready && ui.face_sel.id != CW_INVALID_ENTITY && ed_is_brush(d, ui.face_sel.id)) {
+            /* nudge the selected face's texture: arrows shift, [ ] rotate, - = scale */
+            const cw_brush *b = cw_comp_ptr(&d->gw.world, ui.face_sel.id, d->gw.brush_ct);
+            cw_brush_align al;
+            cw_brush_face_align_get(b, ui.face_sel.face, &al);
+            float step = shift ? 0.5f : 0.125f;
+            bool changed = false;
+            if (r2d_key_typed(SAPP_KEYCODE_LEFT)) { al.shift_u -= step; changed = true; }
+            if (r2d_key_typed(SAPP_KEYCODE_RIGHT)) { al.shift_u += step; changed = true; }
+            if (r2d_key_typed(SAPP_KEYCODE_UP)) { al.shift_v -= step; changed = true; }
+            if (r2d_key_typed(SAPP_KEYCODE_DOWN)) { al.shift_v += step; changed = true; }
+            if (r2d_key_typed(SAPP_KEYCODE_LEFT_BRACKET)) { al.rotation -= shift ? 45 : 15; changed = true; }
+            if (r2d_key_typed(SAPP_KEYCODE_RIGHT_BRACKET)) { al.rotation += shift ? 45 : 15; changed = true; }
+            if (r2d_key_typed(SAPP_KEYCODE_MINUS)) { al.scale_u *= 0.5f; al.scale_v *= 0.5f; changed = true; }
+            if (r2d_key_typed(SAPP_KEYCODE_EQUAL)) { al.scale_u *= 2; al.scale_v *= 2; changed = true; }
+            if (changed) ed_brush_set_face_align(d, ui.face_sel.id, ui.face_sel.face, &al);
+        }
+    }
     if (r2d_key_pressed(SAPP_KEYCODE_F10) && d->project_open) { hd_show(&ui.dock, "rendering"); ui.lights = true; }
     if (r2d_key_pressed(SAPP_KEYCODE_L)) ui.lights = !ui.lights;
     if (r2d_key_pressed(SAPP_KEYCODE_F)) fit_view();
@@ -1918,6 +3040,12 @@ static void handle_keys(void) {
     if (r2d_key_pressed(SAPP_KEYCODE_N)) ed_step(d, 1);
     if (r2d_key_pressed(SAPP_KEYCODE_ESCAPE)) {
         if (d->playing) { ed_stop(d); selection_to_r2d(); }
+        else if (ui.tool == TOOL_CLIP && ui.clip.count) ui.clip.count = 0;
+        else if (ui.tool == TOOL_VERTEX && ui.vertex.active) {   /* the drag goes back where it started */
+            float from[3] = {ui.vertex.current.x, ui.vertex.current.y, ui.vertex.current.z}, to[3] = {ui.vertex.from.x, ui.vertex.from.y, ui.vertex.from.z};
+            if (ui.vertex.moved) ed_brush_move_vertex(d, ui.vertex.id, from, to);
+            ui.vertex.active = ui.vertex.moved = false;
+        }
         else if (ui.tool != TOOL_SELECT) ui.tool = TOOL_SELECT;
         else { ed_select_clear(d); r2d_select_clear(); }
     }
@@ -1926,7 +3054,13 @@ static void handle_keys(void) {
     if (ctrl && r2d_key_pressed(SAPP_KEYCODE_Z)) { if (shift) ed_redo(d); else ed_undo(d); selection_to_r2d(); }
     if (ctrl && r2d_key_pressed(SAPP_KEYCODE_Y)) { ed_redo(d); selection_to_r2d(); }
     if (ctrl && r2d_key_pressed(SAPP_KEYCODE_A)) { ed_select_all(d); selection_to_r2d(); }
-    if (ctrl && r2d_key_pressed(SAPP_KEYCODE_D)) { ed_duplicate_selection(d, 30, 30); selection_to_r2d(); }
+    if (ctrl && r2d_key_pressed(SAPP_KEYCODE_D)) {
+        if (is_3d()) {   /* copies step aside on the ground plane */
+            float step = ui.prefs.grid_spacing_3d > 0 ? ui.prefs.grid_spacing_3d : 1;
+            ed_duplicate_selection3(d, step, 0, step);
+        } else ed_duplicate_selection(d, 30, 30);
+        selection_to_r2d();
+    }
     if (r2d_key_pressed(SAPP_KEYCODE_DELETE) || r2d_key_pressed(SAPP_KEYCODE_BACKSPACE) || (!ctrl && r2d_key_pressed(SAPP_KEYCODE_X))) {
         ed_delete_selection(d);
         selection_to_r2d();
@@ -1934,13 +3068,16 @@ static void handle_keys(void) {
     for (int k = 0; k < 9; ++k)
         if (r2d_key_pressed((sapp_keycode)(SAPP_KEYCODE_1 + k)) && (size_t)k < d->gw.module->prefab_count) { ui.tool = TOOL_PLACE; ui.prefab = (size_t)k; }
     if (r2d_key_pressed(SAPP_KEYCODE_E) && !ctrl) ui.tool = TOOL_CREATE;
+    if (is_3d() && (ui.tool == TOOL_TEXTURE || ui.tool == TOOL_CLIP)) return;   /* those tools own the arrow keys */
     float nudge = (ui.prefs.nudge > 0 ? ui.prefs.nudge : 1) * (shift ? 10 : 1), dx = 0, dy = 0;
+    if (is_3d()) nudge = (ui.prefs.nudge_3d > 0 ? ui.prefs.nudge_3d : 0.25f) * (shift ? 10 : 1);
     if (r2d_key_typed(SAPP_KEYCODE_LEFT)) dx -= nudge;
     if (r2d_key_typed(SAPP_KEYCODE_RIGHT)) dx += nudge;
     if (r2d_key_typed(SAPP_KEYCODE_UP)) dy -= nudge;
     if (r2d_key_typed(SAPP_KEYCODE_DOWN)) dy += nudge;
     if ((dx != 0 || dy != 0) && d->selection_count) {
-        ed_move_selection(d, dx, dy);
+        if (is_3d()) ed_move_selection3(d, dx, 0, dy);   /* over the ground: up is away (-z) */
+        else ed_move_selection(d, dx, dy);
         ed_ui_move_selection(d, dx, dy);   /* interface elements nudge in reference pixels */
         if (r2d_key_released(SAPP_KEYCODE_LEFT) || r2d_key_released(SAPP_KEYCODE_RIGHT) || r2d_key_released(SAPP_KEYCODE_UP) || r2d_key_released(SAPP_KEYCODE_DOWN)) ed_commit(d, "nudge");
     } else if (r2d_key_released(SAPP_KEYCODE_LEFT) || r2d_key_released(SAPP_KEYCODE_RIGHT) || r2d_key_released(SAPP_KEYCODE_UP) || r2d_key_released(SAPP_KEYCODE_DOWN)) {
@@ -1970,6 +3107,12 @@ static void window_init(void) {
     r2d_setup(&desc);
     if (!r2d_valid()) { ui.failed = true; sapp_request_quit(); return; }
     host_canvas_init(&ui.canvas);
+    if (!host_view3d_init(&ui.view3d)) fputs("editor: the 3D renderer is unavailable; 3D projects show no viewport\n", stderr);
+    ui.paint.rgb[0] = 200; ui.paint.rgb[1] = 60; ui.paint.rgb[2] = 50;
+    ui.paint.radius = 1;
+    ui.paint.strength = 0.15f;
+    ui.face_sel.id = CW_INVALID_ENTITY;
+    ui.face_sel.face = -1;
     ea_init(&ui.anim);
     ui.anim_drag_track = ui.anim_drag_key = -1;
     setup_dock();
@@ -2004,7 +3147,7 @@ static void window_frame(void) {
         }
     } else ui.autosave_timer = 0;
     r2d_selection_prune(keep_alive, NULL);
-    ui.hovered = r2d_hovered();
+    if (!is_3d()) ui.hovered = r2d_hovered();   /* the 3D viewport picks in handle_world_input */
     draw_world();
     handle_world_input();
     draw_ui_gizmos();
@@ -2035,6 +3178,7 @@ static void window_event(const sapp_event *event) {
 static void window_cleanup(void) {
     if (!ui.ready) return;
     host_canvas_destroy(&ui.canvas);
+    host_view3d_destroy(&ui.view3d);
     r2d_shutdown();
     ui.ready = false;
 }

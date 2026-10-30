@@ -22,7 +22,7 @@ $outDir = Split-Path -Parent $Output
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $objDir = Join-Path $outDir 'obj'
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null
-$engineSources = @('clockwork', 'cw_sim', 'cw_commands', 'cw_bytes', 'cw_snapshot', 'cw_file', 'cw_reflect', 'cw_scene', 'cw_game', 'cw_assets', 'cw_anim', 'cw_ui') | ForEach-Object { Join-Path $EngineRoot "src\$_.c" }
+$engineSources = @('clockwork', 'cw_sim', 'cw_commands', 'cw_bytes', 'cw_snapshot', 'cw_file', 'cw_reflect', 'cw_scene', 'cw_game', 'cw_assets', 'cw_anim', 'cw_ui', 'cw_brush') | ForEach-Object { Join-Path $EngineRoot "src\$_.c" }
 $flags = @('/nologo', '/std:c11', '/TC', '/W4', '/O2', "/I$EngineRoot\include", "/Fo$objDir\")
 function Run([string[]]$command) {
     Write-Host "+ $($command -join ' ')"
@@ -37,9 +37,10 @@ switch ($Mode) {
     'export' {
         $sokol = Join-Path $EngineRoot 'third_party\sokol'
         $render2d = @('render2d', 'r2d_particles', 'r2d_effects', 'r2d_tunables', 'r2d_post_params', 'r2d_post', 'r2d_post_shaders', 'r2d_shadow', 'r2d_lighting', 'r2d_quality', 'r2d_image', 'r2d_material', 'r2d_sprite', 'r2d_sprite_shaders') | ForEach-Object { Join-Path $EngineRoot "render2d\$_.c" }
+        $render3d = @('render3d', 'r3d_mesh', 'r3d_shaders') | ForEach-Object { Join-Path $EngineRoot "render3d\$_.c" }
         Run (@('cl', '/nologo', '/std:c11', '/TC', '/w', '/O1', '/DSOKOL_D3D11', "/I$sokol", '/c', (Join-Path $EngineRoot 'examples\sokol_impl.c'), "/Fo$objDir\sokol_impl.obj"))
-        Run (@('cl') + $flags + @('/DSOKOL_D3D11', '/DCW_STATIC_GAME', "/I$EngineRoot\render2d", "/I$EngineRoot\runtime", "/I$sokol",
-            (Join-Path $EngineRoot 'runtime\player.c'), (Join-Path $EngineRoot 'runtime\host_canvas.c')) + $render2d + $engineSources + $Sources +
+        Run (@('cl') + $flags + @('/DSOKOL_D3D11', '/DCW_STATIC_GAME', "/I$EngineRoot\render2d", "/I$EngineRoot\render3d", "/I$EngineRoot\runtime", "/I$sokol",
+            (Join-Path $EngineRoot 'runtime\player.c'), (Join-Path $EngineRoot 'runtime\host_canvas.c'), (Join-Path $EngineRoot 'runtime\host_view3d.c')) + $render2d + $render3d + $engineSources + $Sources +
             @("$objDir\sokol_impl.obj", "/Fe:$Output", '/link', 'd3d11.lib', 'dxgi.lib', 'user32.lib', 'gdi32.lib', 'shell32.lib', 'ole32.lib', '/INCREMENTAL:NO'))
         Copy-Item -Force $Project (Join-Path $outDir 'game.cwproj')
         $scenes = Join-Path $projectDir 'scenes'

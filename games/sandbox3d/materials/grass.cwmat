@@ -1,0 +1,19 @@
+cwmaterial 1
+name grass
+texture grass.png
+effect sprite
+shader 
+blend opaque
+filter linear
+wrap repeat
+tint 1 1 1 1
+tiling 1 1
+offset 0 0
+p0 0 0 0 0
+p1 0 0 0 0
+p2 0 0 0 0
+p3 0 0 0 0
+shading lit
+specular 0.05 0.05 0.05
+shininess 8
+emissive 0 0 0

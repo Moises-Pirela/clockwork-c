@@ -78,6 +78,8 @@ static struct {
     bool ui_press_valid;
 
     r2d_stats stats, pending_stats;
+    r2d_underlay underlay;
+    bool has_underlay;
 } S;
 
 /* ---------------------------------------------------------------------------
@@ -275,6 +277,20 @@ void r2d_shutdown(void) {
 bool r2d_valid(void) { return S.valid; }
 void r2d_set_clear_color(r2d_color color) { S.desc.clear_color = color; }
 void r2d_set_text_scale(float scale) { if (scale > 0) S.desc.text_scale = scale; }
+void r2d_set_underlay(const r2d_underlay *underlay) {
+    S.has_underlay = underlay != NULL;
+    if (underlay) S.underlay = *underlay; else memset(&S.underlay, 0, sizeof(S.underlay));
+}
+static void draw_underlay(sg_pixel_format color, sg_pixel_format depth, int sample_count, bool post) {
+    if (!S.has_underlay || !S.underlay.draw) return;
+    r2d_pass_info info;
+    info.color_format = (int)color;
+    info.depth_format = (int)depth;
+    info.sample_count = sample_count;
+    info.viewport = S.viewport;
+    info.post_processed = post;
+    S.underlay.draw(S.underlay.user, &info);
+}
 
 /* ---------------------------------------------------------------------------
  * events and input
@@ -495,7 +511,9 @@ void r2d_end_frame(void) {
     }
     bool ui_in_scene = S.post_frame && r2d_post_params_ptr() && r2d_post_params_ptr()->post.apply_to_ui;
     sg_environment env = sglue_environment();
+    if (S.has_underlay && S.underlay.prepare) S.underlay.prepare(S.underlay.user);   /* its own passes, before ours opens */
     if (S.post_frame && r2d_post__begin_scene(pass.action.colors[0].clear_value)) {
+        draw_underlay(r2d_post__scene_color_format(), SG_PIXELFORMAT_NONE, r2d_post__scene_sample_count(), true);
         sgl_context_draw_layer(S.gl_scene, 0);
         sdtx_context_draw_layer(S.text_scene, 0);
         if (S.sprites_ready) r2d_sprite__flush(r2d_post__scene_color_format(), SG_PIXELFORMAT_NONE, r2d_post__scene_sample_count(), &S.camera, S.viewport, S.time);
@@ -514,6 +532,7 @@ void r2d_end_frame(void) {
         r2d_post__run(pass.swapchain);   /* leaves the window pass open with the result drawn */
     } else {
         sg_begin_pass(&pass);
+        draw_underlay(env.defaults.color_format, env.defaults.depth_format, sapp_sample_count(), false);
     }
     sgl_context_draw_layer(overlay, 0);
     sdtx_context_draw_layer(overlay_text, 0);
@@ -563,6 +582,12 @@ r2d_vec2 r2d_viewport(void) { return S.viewport; }
 float r2d_dpi_scale(void) { return S.dpi; }
 float r2d_dt(void) { return S.dt; }
 uint64_t r2d_frame_count(void) { return S.frame; }
+void r2d_set_camera_controls(bool enabled) {
+    S.desc.camera_controls = enabled;
+    if (enabled && !S.desc.pan_with_right_button && !S.desc.pan_with_middle_button && !S.desc.pan_with_arrows && !S.desc.pan_with_wasd)
+        S.desc.pan_with_right_button = S.desc.pan_with_middle_button = true;
+    if (!enabled) { S.pan_button = -1; S.panning = false; }
+}
 r2d_camera *r2d_camera_ptr(void) { return &S.camera; }
 void r2d_set_camera(r2d_camera camera) {
     if (camera.zoom <= 0) camera.zoom = 1;

@@ -47,7 +47,7 @@ fi
 
 run() { echo "+ $*"; "$@"; }
 cd "$out"
-engine_sources=(clockwork cw_sim cw_commands cw_bytes cw_snapshot cw_file cw_reflect cw_scene cw_game cw_assets cw_anim cw_ui)
+engine_sources=(clockwork cw_sim cw_commands cw_bytes cw_snapshot cw_file cw_reflect cw_scene cw_game cw_assets cw_anim cw_ui cw_brush)
 objects=()
 for unit in "${engine_sources[@]}"; do
     run "$compiler" "${cflags[@]}" -fPIC -c "$root/src/$unit.c" -o "$unit.o"
@@ -77,11 +77,17 @@ orbit_module=$root/games/orbit/build/orbit_game.so
 [ "$(uname -s)" = Darwin ] && orbit_module=$root/games/orbit/build/orbit_game.dylib
 mkdir -p "$(dirname "$orbit_module")"
 run "$compiler" "${cflags[@]}" -shared -fPIC "$root/games/orbit/orbit_game.c" "${objects[@]}" -o "$orbit_module" "${ldflags[@]}"
+sandbox3d_project=$root/games/sandbox3d/sandbox3d.cwproj
+sandbox3d_module=$root/games/sandbox3d/build/sandbox3d_game.so
+[ "$(uname -s)" = Darwin ] && sandbox3d_module=$root/games/sandbox3d/build/sandbox3d_game.dylib
+mkdir -p "$(dirname "$sandbox3d_module")"
+run "$compiler" "${cflags[@]}" -shared -fPIC "$root/games/sandbox3d/sandbox3d_game.c" "${objects[@]}" -o "$sandbox3d_module" "${ldflags[@]}"
 run "$compiler" "${cflags[@]}" -I"$root/editor" -I"$root/render2d" "$root/tests/test_editor.c" "$root/editor/editor_core.c" "$root/editor/editor_settings.c" "$root/editor/editor_anim.c" "$root/render2d/r2d_tunables.c" -o clockwork_editor_tests libclockwork.a "${ldflags[@]}"
 CC=$compiler run ./clockwork_editor_tests "$combat_project" "$root" "$orbit_project" | tee editor_tests.log
 grep -q 'OK: [0-9]* editor checks passed' editor_tests.log || { echo "editor tests produced unexpected output" >&2; exit 1; }
 
 run "$compiler" "${cflags[@]}" -fPIC -shared "$root/launcher/template/game.c" "${objects[@]}" -o starter_template.so "${ldflags[@]}"
+run "$compiler" "${cflags[@]}" -fPIC -shared "$root/launcher/template3d/game.c" "${objects[@]}" -o starter_template3d.so "${ldflags[@]}"
 run "$compiler" "${cflags[@]}" -I"$root/launcher" "$root/tests/test_launcher.c" "$root/launcher/launcher_core.c" -o clockwork_launcher_tests libclockwork.a "${ldflags[@]}"
 CC=$compiler run ./clockwork_launcher_tests "$root" "$out" | tee launcher_tests.log
 grep -q 'OK: [0-9]* launcher checks passed' launcher_tests.log || { echo "launcher tests produced unexpected output" >&2; exit 1; }
@@ -89,6 +95,8 @@ grep -q 'OK: [0-9]* launcher checks passed' launcher_tests.log || { echo "launch
 sokol=$(bash "$root/tools/prepare-sokol.sh")
 run "$compiler" "${cflags[@]}" -I"$root/render2d" -I"$sokol" "$root/tests/test_render2d.c" -o clockwork_render2d_tests "${ldflags[@]}"
 run ./clockwork_render2d_tests
+run "$compiler" "${cflags[@]}" -I"$root/render3d" -I"$sokol" "$root/tests/test_render3d.c" "$root/render3d/r3d_mesh.c" -o clockwork_render3d_tests "${ldflags[@]}"
+run ./clockwork_render3d_tests
 run "$compiler" "${cflags[@]}" -I"$root/render2d" "$root/tests/test_image.c" "$root/render2d/r2d_image.c" "$root/render2d/r2d_material.c" -o clockwork_image_tests "${ldflags[@]}"
 if command -v python3 >/dev/null 2>&1; then python3 "$root/tools/gen-test-images.py" test_images && run ./clockwork_image_tests test_images; else run ./clockwork_image_tests; fi
 run "$compiler" "${cflags[@]}" -I"$root/runtime" -I"$root/render2d" -I"$sokol" "$root/tests/test_dock.c" "$root/runtime/host_dock.c" -o clockwork_dock_tests "${ldflags[@]}"
@@ -158,25 +166,41 @@ if [ "$gui" = 1 ]; then
     done
     rm -f libclockwork_render2d.a
     run ar rcs libclockwork_render2d.a "${r2d_objects[@]}"
+    # render3d: the unlit 3D renderer, composited into render2d's frame
+    r3d_objects=()
+    for unit in render3d r3d_mesh r3d_shaders; do
+        run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render3d" -I"$sokol" -c "$root/render3d/$unit.c" -o "$unit.o"
+        r3d_objects+=("$unit.o")
+    done
+    rm -f libclockwork_render3d.a
+    run ar rcs libclockwork_render3d.a "${r3d_objects[@]}"
+    # render3d on its own: the four primitives in a window (a usage example and a smoke test: --frames N)
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render3d" -I"$sokol" "$root/examples/shapes3d.c" -o clockwork_shapes3d \
+        libclockwork_render3d.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
     run cp "$root/tunable.cfg" tunable.cfg
-    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$root/runtime" -I"$sokol" -c "$root/runtime/host_canvas.c" -o host_canvas.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$root/render3d" -I"$root/runtime" -I"$sokol" -c "$root/runtime/host_canvas.c" -o host_canvas.o
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$root/render3d" -I"$root/runtime" -I"$sokol" -c "$root/runtime/host_view3d.c" -o host_view3d.o
     run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$root/runtime" -I"$sokol" -c "$root/runtime/host_ui.c" -o host_ui.o
     run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$root/runtime" -I"$sokol" -c "$root/runtime/host_dock.c" -o host_dock.o
     # the player: runs any module on a scene (exported games are this with the module linked in)
-    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$root/runtime" -I"$sokol" "$root/runtime/player.c" host_canvas.o -o clockwork_player \
-        libclockwork.a libclockwork_render2d.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -I"$root/render2d" -I"$root/render3d" -I"$root/runtime" -I"$sokol" "$root/runtime/player.c" host_canvas.o host_view3d.o -o clockwork_player \
+        libclockwork.a libclockwork_render2d.a libclockwork_render3d.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
     run ./clockwork_player --project "$combat_project" --headless 120 | tee player.log
     grep -q 'OK: combat ran 120 ticks headless' player.log || { echo "player produced unexpected output" >&2; exit 1; }
     run ./clockwork_player --project "$orbit_project" --headless 300 | tee player_orbit.log
     grep -q 'OK: orbit ran 300 ticks headless' player_orbit.log || { echo "player produced unexpected output for orbit" >&2; exit 1; }
+    run ./clockwork_player --project "$sandbox3d_project" --headless 120 | tee player_sandbox3d.log
+    grep -q 'OK: sandbox3d ran 120 ticks headless' player_sandbox3d.log || { echo "player produced unexpected output for sandbox3d" >&2; exit 1; }
     # the editor: opens projects, edits scenes, builds games
-    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -DCW_ENGINE_ROOT="\"$root\"" -I"$root/editor" -I"$root/render2d" -I"$root/runtime" -I"$sokol" \
-        "$root/editor/editor_main.c" "$root/editor/editor_core.c" "$root/editor/editor_settings.c" "$root/editor/editor_anim.c" host_canvas.o host_ui.o host_dock.o -o clockwork_editor \
-        libclockwork.a libclockwork_render2d.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
+    run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -DCW_ENGINE_ROOT="\"$root\"" -I"$root/editor" -I"$root/render2d" -I"$root/render3d" -I"$root/runtime" -I"$sokol" \
+        "$root/editor/editor_main.c" "$root/editor/editor_core.c" "$root/editor/editor_settings.c" "$root/editor/editor_anim.c" host_canvas.o host_view3d.o host_ui.o host_dock.o -o clockwork_editor \
+        libclockwork.a libclockwork_render2d.a libclockwork_render3d.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
     # the launcher: lists, creates, builds and opens projects
     run "$compiler" "${cflags[@]}" "${gui_flags[@]}" -DCW_ENGINE_ROOT="\"$root\"" -I"$root/launcher" -I"$root/render2d" -I"$root/runtime" -I"$sokol" \
         "$root/launcher/launcher_main.c" "$root/launcher/launcher_core.c" host_ui.o host_dock.o -o clockwork_launcher \
         libclockwork.a libclockwork_render2d.a libclockwork_sokol.a "${ldflags[@]}" "${gui_libraries[@]}"
+    # the product's front door: the launcher under its own name, next to the editor and the player it starts
+    run cp clockwork_launcher Clockwork
 fi
 
 if [ -f "$root/examples/visualizer.c" ]; then
@@ -185,6 +209,6 @@ if [ -f "$root/examples/visualizer.c" ]; then
 fi
 
 echo "Built and tested $out"
-[ "$gui" = 1 ] && echo "Run $out/clockwork_launcher to create and open projects, or $out/clockwork_editor --project games/combat/combat.cwproj for the editor."
-[ "$gui" = 1 ] && echo "Run $out/clockwork_player --project games/combat/combat.cwproj for the combat game (or games/orbit/orbit.cwproj)."
+[ "$gui" = 1 ] && echo "Run $out/Clockwork (the launcher; clockwork_launcher is the same program) to create and open projects, or $out/clockwork_editor --project games/combat/combat.cwproj for the editor."
+[ "$gui" = 1 ] && echo "Run $out/clockwork_player --project games/combat/combat.cwproj for the combat game (or games/orbit/orbit.cwproj, or the 3D games/sandbox3d/sandbox3d.cwproj)."
 exit 0

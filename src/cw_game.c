@@ -5,6 +5,7 @@
 #include "cw_game.h"
 #include "cw_internal.h"
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -207,6 +208,193 @@ static void draw_sprites(cw_game_world *gw, const cw_canvas *c) {
     }
 }
 
+/* --- the Shape3D component --- */
+const char *const cw_shape3d_kind_names[CW_SHAPE_KINDS] = {"sphere", "capsule", "cube", "plane"};
+static const cw_field shape3d_fields[] = {
+    CW_FIELD_NAMED(cw_shape3d, kind, CW_FIELD_ENUM, cw_shape3d_kind_names, CW_SHAPE_KINDS),
+    CW_FIELD_RANGE_SEM(cw_shape3d, width, CW_FIELD_F32, 0.01f, 10000, 0.1f, CW_SEM_SIZE_X),
+    CW_FIELD_RANGE_SEM(cw_shape3d, height, CW_FIELD_F32, 0, 10000, 0.1f, CW_SEM_SIZE_Y),
+    CW_FIELD_RANGE_SEM(cw_shape3d, depth, CW_FIELD_F32, 0.01f, 10000, 0.1f, CW_SEM_SIZE_Z),
+    CW_FIELD_SEM(cw_shape3d, rx, CW_FIELD_F32, CW_SEM_ROTATION_X),
+    CW_FIELD_SEM(cw_shape3d, ry, CW_FIELD_F32, CW_SEM_ROTATION_Y),
+    CW_FIELD_SEM(cw_shape3d, rz, CW_FIELD_F32, CW_SEM_ROTATION_Z),
+    CW_FIELD_SEM(cw_shape3d, r, CW_FIELD_U8, CW_SEM_COLOR_R),
+    CW_FIELD_SEM(cw_shape3d, g, CW_FIELD_U8, CW_SEM_COLOR_G),
+    CW_FIELD_SEM(cw_shape3d, b, CW_FIELD_U8, CW_SEM_COLOR_B),
+    CW_FIELD_RANGE(cw_shape3d, a, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_shape3d, checker, CW_FIELD_F32, 0, 100, 0.5f),
+    CW_FIELD(cw_shape3d, wireframe, CW_FIELD_BOOL),
+    CW_FIELD_SEM(cw_shape3d, material, CW_FIELD_U32, CW_SEM_ASSET),
+};
+static const cw_shape3d shape3d_defaults = {CW_SHAPE_CUBE, 1, 1, 1, 0, 0, 0, 200, 200, 210, 255, 0, false, 0};
+const cw_type_info cw_shape3d_type = {"Shape3D", sizeof(cw_shape3d), _Alignof(cw_shape3d), shape3d_fields, 14, &shape3d_defaults, NULL, 0, NULL, NULL};
+void cw_shape3d_to_canvas(const cw_shape3d *s, float x, float y, float z, cw_entity_id id, cw_canvas_shape3d *out) {
+    memset(out, 0, sizeof(*out));
+    out->kind = s->kind < CW_SHAPE_KINDS ? (cw_shape3d_kind)s->kind : CW_SHAPE_CUBE;
+    out->x = x; out->y = y; out->z = z;
+    out->rx = s->rx; out->ry = s->ry; out->rz = s->rz;
+    out->sx = s->width; out->sy = s->height; out->sz = s->depth;
+    out->color = cw_rgba_make(s->r, s->g, s->b, s->a);
+    out->checker = s->checker;
+    out->wireframe = s->wireframe;
+    out->material = s->material;
+    out->id = id;
+}
+/* --- the Light3D component --- */
+const char *const cw_light3d_kind_names[CW_LIGHT_KINDS] = {"ambient", "directional", "point", "spot"};
+static const cw_field light3d_fields[] = {
+    CW_FIELD_NAMED(cw_light3d, kind, CW_FIELD_ENUM, cw_light3d_kind_names, CW_LIGHT_KINDS),
+    CW_FIELD_SEM(cw_light3d, r, CW_FIELD_U8, CW_SEM_COLOR_R),
+    CW_FIELD_SEM(cw_light3d, g, CW_FIELD_U8, CW_SEM_COLOR_G),
+    CW_FIELD_SEM(cw_light3d, b, CW_FIELD_U8, CW_SEM_COLOR_B),
+    CW_FIELD_RANGE(cw_light3d, intensity, CW_FIELD_F32, 0, 100, 0.1f),
+    CW_FIELD_RANGE(cw_light3d, range, CW_FIELD_F32, 0.01f, 10000, 0.5f),
+    CW_FIELD_SEM(cw_light3d, pitch, CW_FIELD_F32, CW_SEM_ANGLE),
+    CW_FIELD_SEM(cw_light3d, yaw, CW_FIELD_F32, CW_SEM_ANGLE),
+    CW_FIELD_RANGE_SEM(cw_light3d, cone, CW_FIELD_F32, 0.01f, 3.1f, 0.0872665f, CW_SEM_ANGLE),
+    CW_FIELD(cw_light3d, shadows, CW_FIELD_BOOL),
+};
+static const cw_light3d light3d_defaults = {CW_LIGHT_POINT, 255, 244, 220, 1, 10, -0.9f, 0.6f, 0.8f, true};
+const cw_type_info cw_light3d_type = {"Light3D", sizeof(cw_light3d), _Alignof(cw_light3d), light3d_fields, 10, &light3d_defaults, NULL, 0, NULL, NULL};
+void cw_light3d_to_canvas(const cw_light3d *l, float x, float y, float z, cw_entity_id id, cw_canvas_light3d *out) {
+    memset(out, 0, sizeof(*out));
+    out->kind = l->kind < CW_LIGHT_KINDS ? (cw_light3d_kind)l->kind : CW_LIGHT_POINT;
+    out->x = x; out->y = y; out->z = z;
+    /* pitch 0 is level, negative points down; yaw 0 points along -z, turning towards +x */
+    float cp = cosf(l->pitch);
+    out->dx = sinf(l->yaw) * cp;
+    out->dy = sinf(l->pitch);
+    out->dz = -cosf(l->yaw) * cp;
+    out->color = cw_rgba_make(l->r, l->g, l->b, 255);
+    out->intensity = l->intensity;
+    out->range = l->range;
+    out->cone = l->cone;
+    out->shadows = l->shadows;
+    out->id = id;
+}
+static const cw_field sky3d_fields[] = {
+    CW_FIELD_RANGE(cw_sky3d, zenith_r, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, zenith_g, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, zenith_b, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, horizon_r, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, horizon_g, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, horizon_b, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, ground_r, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, ground_g, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, ground_b, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_RANGE(cw_sky3d, sun_size, CW_FIELD_F32, 0, 1, 0.005f),
+    CW_FIELD_RANGE(cw_sky3d, sun_intensity, CW_FIELD_F32, 0, 20, 0.1f),
+    CW_FIELD_SEM(cw_sky3d, image_east, CW_FIELD_U32, CW_SEM_ASSET),
+    CW_FIELD_SEM(cw_sky3d, image_west, CW_FIELD_U32, CW_SEM_ASSET),
+    CW_FIELD_SEM(cw_sky3d, image_up, CW_FIELD_U32, CW_SEM_ASSET),
+    CW_FIELD_SEM(cw_sky3d, image_down, CW_FIELD_U32, CW_SEM_ASSET),
+    CW_FIELD_SEM(cw_sky3d, image_south, CW_FIELD_U32, CW_SEM_ASSET),
+    CW_FIELD_SEM(cw_sky3d, image_north, CW_FIELD_U32, CW_SEM_ASSET),
+};
+static const cw_sky3d sky3d_defaults = {70, 110, 190, 190, 210, 235, 60, 58, 62, 0.03f, 3, 0, 0, 0, 0, 0, 0};
+const cw_type_info cw_sky3d_type = {"Sky3D", sizeof(cw_sky3d), _Alignof(cw_sky3d), sky3d_fields, 17, &sky3d_defaults, NULL, 0, NULL, NULL};
+void cw_sky3d_to_canvas(const cw_sky3d *s, cw_entity_id id, cw_canvas_sky3d *out) {
+    memset(out, 0, sizeof(*out));
+    out->zenith = cw_rgba_make(s->zenith_r, s->zenith_g, s->zenith_b, 255);
+    out->horizon = cw_rgba_make(s->horizon_r, s->horizon_g, s->horizon_b, 255);
+    out->ground = cw_rgba_make(s->ground_r, s->ground_g, s->ground_b, 255);
+    out->sun_size = s->sun_size;
+    out->sun_intensity = s->sun_intensity;
+    uint32_t images[6] = {s->image_east, s->image_west, s->image_up, s->image_down, s->image_south, s->image_north};
+    bool all = true;
+    for (int i = 0; i < 6; ++i) if (!images[i]) all = false;
+    if (all) memcpy(out->images, images, sizeof(images));   /* a partial set falls back to the gradient */
+    out->id = id;
+}
+static const cw_field decal3d_fields[] = {
+    CW_FIELD_RANGE_SEM(cw_decal3d, width, CW_FIELD_F32, 0.01f, 10000, 0.1f, CW_SEM_SIZE_X),
+    CW_FIELD_RANGE_SEM(cw_decal3d, height, CW_FIELD_F32, 0.01f, 10000, 0.1f, CW_SEM_SIZE_Z),
+    CW_FIELD_RANGE_SEM(cw_decal3d, depth, CW_FIELD_F32, 0.01f, 10000, 0.1f, CW_SEM_SIZE_Y),
+    CW_FIELD_SEM(cw_decal3d, rx, CW_FIELD_F32, CW_SEM_ROTATION_X),
+    CW_FIELD_SEM(cw_decal3d, ry, CW_FIELD_F32, CW_SEM_ROTATION_Y),
+    CW_FIELD_SEM(cw_decal3d, rz, CW_FIELD_F32, CW_SEM_ROTATION_Z),
+    CW_FIELD_SEM(cw_decal3d, r, CW_FIELD_U8, CW_SEM_COLOR_R),
+    CW_FIELD_SEM(cw_decal3d, g, CW_FIELD_U8, CW_SEM_COLOR_G),
+    CW_FIELD_SEM(cw_decal3d, b, CW_FIELD_U8, CW_SEM_COLOR_B),
+    CW_FIELD_RANGE(cw_decal3d, a, CW_FIELD_U8, 0, 255, 5),
+    CW_FIELD_SEM(cw_decal3d, material, CW_FIELD_U32, CW_SEM_ASSET),
+    CW_FIELD_SEM(cw_decal3d, max_angle, CW_FIELD_F32, CW_SEM_ANGLE),
+};
+static const cw_decal3d decal3d_defaults = {1, 1, 0.5f, 0, 0, 0, 255, 255, 255, 255, 0, 1.3962634f};   /* 80 degrees */
+const cw_type_info cw_decal3d_type = {"Decal3D", sizeof(cw_decal3d), _Alignof(cw_decal3d), decal3d_fields, 12, &decal3d_defaults, NULL, 0, NULL, NULL};
+void cw_decal3d_to_canvas(const cw_decal3d *d, float x, float y, float z, cw_entity_id id, cw_canvas_decal3d *out) {
+    memset(out, 0, sizeof(*out));
+    out->x = x; out->y = y; out->z = z;
+    out->rx = d->rx; out->ry = d->ry; out->rz = d->rz;
+    out->sx = d->width; out->sy = d->depth; out->sz = d->height;
+    out->color = cw_rgba_make(d->r, d->g, d->b, d->a);
+    out->material = d->material;
+    out->max_angle = d->max_angle;
+    out->id = id;
+}
+static void draw_decals3d(cw_game_world *gw, const cw_canvas *c) {
+    if (!c->decal3d || gw->decal3d_ct == CW_INVALID_COMPONENT) return;
+    cw_world *w = &gw->world;
+    cw_query q = cw_query_iter(w, cw_mask(&gw->decal3d_ct, 1));
+    cw_entity_id id;
+    while (cw_query_next(&q, &id)) {
+        float x = 0, y = 0, z = 0;
+        cw_reflect_position3(w, id, &x, &y, &z);
+        cw_canvas_decal3d decal;
+        cw_decal3d_to_canvas(cw_comp_ptr(w, id, gw->decal3d_ct), x, y, z, id, &decal);
+        c->decal3d(c->impl, &decal);
+    }
+}
+static void draw_sky3d(cw_game_world *gw, const cw_canvas *c) {
+    if (!c->sky3d || gw->sky3d_ct == CW_INVALID_COMPONENT) return;
+    cw_world *w = &gw->world;
+    cw_query q = cw_query_iter(w, cw_mask(&gw->sky3d_ct, 1));
+    cw_entity_id id;
+    if (!cw_query_next(&q, &id)) return;
+    cw_canvas_sky3d sky;
+    cw_sky3d_to_canvas(cw_comp_ptr(w, id, gw->sky3d_ct), id, &sky);
+    c->sky3d(c->impl, &sky);
+}
+static void draw_lights3d(cw_game_world *gw, const cw_canvas *c) {
+    if (!c->light3d || gw->light3d_ct == CW_INVALID_COMPONENT) return;
+    cw_world *w = &gw->world;
+    cw_query q = cw_query_iter(w, cw_mask(&gw->light3d_ct, 1));
+    cw_entity_id id;
+    while (cw_query_next(&q, &id)) {
+        float x = 0, y = 0, z = 0;
+        cw_reflect_position3(w, id, &x, &y, &z);   /* ambient and directional lights need no position */
+        cw_canvas_light3d light;
+        cw_light3d_to_canvas(cw_comp_ptr(w, id, gw->light3d_ct), x, y, z, id, &light);
+        c->light3d(c->impl, &light);
+    }
+}
+static void draw_brushes(cw_game_world *gw, const cw_canvas *c) {
+    if (!c->brush3d || gw->brush_ct == CW_INVALID_COMPONENT) return;
+    cw_world *w = &gw->world;
+    cw_query q = cw_query_iter(w, cw_mask(&gw->brush_ct, 1));
+    cw_entity_id id;
+    while (cw_query_next(&q, &id)) {
+        cw_canvas_brush b;
+        if (!cw_reflect_position3(w, id, &b.x, &b.y, &b.z)) continue;
+        b.brush = cw_comp_ptr(w, id, gw->brush_ct);
+        b.id = id;
+        c->brush3d(c->impl, &b);
+    }
+}
+static void draw_shapes3d(cw_game_world *gw, const cw_canvas *c) {
+    if (!c->shape3d || gw->shape3d_ct == CW_INVALID_COMPONENT) return;
+    cw_world *w = &gw->world;
+    cw_query q = cw_query_iter(w, cw_mask(&gw->shape3d_ct, 1));
+    cw_entity_id id;
+    while (cw_query_next(&q, &id)) {
+        float x, y, z;
+        if (!cw_reflect_position3(w, id, &x, &y, &z)) continue;
+        cw_canvas_shape3d shape;
+        cw_shape3d_to_canvas(cw_comp_ptr(w, id, gw->shape3d_ct), x, y, z, id, &shape);
+        c->shape3d(c->impl, &shape);
+    }
+}
+
 /* The interface: laid out on the screen the host gave, drawn element by element through the hud ops. */
 static void draw_ui(cw_game_world *gw, const cw_canvas *c, const cw_draw_context *ctx) {
     if (!cw_ui_ready(&gw->ui)) return;
@@ -298,6 +486,31 @@ static bool bind(cw_game_world *gw, char *error, size_t error_capacity) {
         set_error(error, error_capacity, "cannot register the Sprite component");
         goto fail;
     }
+    gw->shape3d_ct = cw_comp_block(&gw->world, 1);
+    if (gw->shape3d_ct == CW_INVALID_COMPONENT || !cw_reflect_register(&gw->world, gw->shape3d_ct, &cw_shape3d_type)) {
+        set_error(error, error_capacity, "cannot register the Shape3D component");
+        goto fail;
+    }
+    gw->light3d_ct = cw_comp_block(&gw->world, 1);
+    if (gw->light3d_ct == CW_INVALID_COMPONENT || !cw_reflect_register(&gw->world, gw->light3d_ct, &cw_light3d_type)) {
+        set_error(error, error_capacity, "cannot register the Light3D component");
+        goto fail;
+    }
+    gw->brush_ct = cw_comp_block(&gw->world, 1);
+    if (gw->brush_ct == CW_INVALID_COMPONENT || !cw_reflect_register(&gw->world, gw->brush_ct, &cw_brush_type)) {
+        set_error(error, error_capacity, "cannot register the Brush component");
+        goto fail;
+    }
+    gw->sky3d_ct = cw_comp_block(&gw->world, 1);
+    if (gw->sky3d_ct == CW_INVALID_COMPONENT || !cw_reflect_register(&gw->world, gw->sky3d_ct, &cw_sky3d_type)) {
+        set_error(error, error_capacity, "cannot register the Sky3D component");
+        goto fail;
+    }
+    gw->decal3d_ct = cw_comp_block(&gw->world, 1);
+    if (gw->decal3d_ct == CW_INVALID_COMPONENT || !cw_reflect_register(&gw->world, gw->decal3d_ct, &cw_decal3d_type)) {
+        set_error(error, error_capacity, "cannot register the Decal3D component");
+        goto fail;
+    }
     if (!cw_ui_register(&gw->world, &gw->ui)) {
         set_error(error, error_capacity, "cannot register the Ui components");
         goto fail;
@@ -334,7 +547,7 @@ bool cw_game_world_init(cw_game_world *gw, const cw_game_module *module, char *e
     if (!cw_game_module_valid(module)) { set_error(error, error_capacity, "invalid module"); return false; }
     gw->module = module;
     gw->baking = true;
-    gw->animation_ct = gw->sprite_ct = CW_INVALID_COMPONENT;
+    gw->animation_ct = gw->sprite_ct = gw->shape3d_ct = gw->light3d_ct = gw->brush_ct = gw->sky3d_ct = gw->decal3d_ct = CW_INVALID_COMPONENT;
     gw->ui.rect = gw->ui.image = gw->ui.text = gw->ui.button = gw->ui.layout = CW_INVALID_COMPONENT;
     gw->ui_canvas = cw_ui_canvas_default();
     gw->ui_screen.x = gw->ui_screen.y = 0;
@@ -419,6 +632,11 @@ void cw_game_world_draw(cw_game_world *gw, const cw_canvas *canvas, const cw_dra
     if (ctx) c = *ctx;
     if (gw->module->draw) gw->module->draw(&gw->world, canvas, &c);
     draw_sprites(gw, canvas);   /* the engine's sprites, for every game */
+    draw_sky3d(gw, canvas);     /* its sky, 3D lights, brushes and primitives, when the host has a 3D view */
+    draw_lights3d(gw, canvas);
+    draw_brushes(gw, canvas);
+    draw_shapes3d(gw, canvas);
+    draw_decals3d(gw, canvas);  /* after the surfaces they project onto */
     draw_ui(gw, canvas, &c);    /* and its interface */
 }
 void cw_game_world_set_ui_canvas(cw_game_world *gw, const cw_ui_canvas *canvas) {
@@ -456,6 +674,13 @@ size_t cw_game_world_bake_all(cw_game_world *gw) {
 }
 
 /* --- projects --- */
+const char *cw_renderer_name(cw_renderer_kind kind) { return kind == CW_RENDERER_3D ? "3d" : "2d"; }
+bool cw_renderer_parse(const char *text, cw_renderer_kind *out) {
+    if (!text) return false;
+    if (strcmp(text, "2d") == 0) { if (out) *out = CW_RENDERER_2D; return true; }
+    if (strcmp(text, "3d") == 0) { if (out) *out = CW_RENDERER_3D; return true; }
+    return false;
+}
 static bool is_absolute(const char *p) {
 #ifdef _WIN32
     return (p[0] && p[1] == ':') || p[0] == '\\' || p[0] == '/';
@@ -510,6 +735,7 @@ bool cw_project_load(cw_project *project, const char *path, char *error, size_t 
     project->window_width = 1280;
     project->window_height = 800;
     project->ui = cw_ui_canvas_default();
+    project->renderer = CW_RENDERER_2D;
     const char *p = (const char *)image.data, *end = p + image.size;
     int line_no = 0;
     while (ok && p < end) {
@@ -557,6 +783,13 @@ bool cw_project_load(cw_project *project, const char *path, char *error, size_t 
                 set_error(error, error_capacity, message);
                 ok = false;
             } else { project->ui.width = w; project->ui.height = h; }
+        } else if (strcmp(s, "renderer") == 0) {
+            if (!cw_renderer_parse(value, &project->renderer)) {
+                char message[96];
+                snprintf(message, sizeof(message), "line %d: renderer must be 2d or 3d", line_no);
+                set_error(error, error_capacity, message);
+                ok = false;
+            }
         } else if (strcmp(s, "source") == 0) {
             if (project->source_count == CW_PROJECT_MAX_SOURCES) { set_error(error, error_capacity, "too many sources"); ok = false; }
             else {
@@ -618,6 +851,9 @@ bool cw_project_save(const cw_project *project, char *error, size_t error_capaci
     write_text(&out, line);
     write_text(&out, "# the interface's reference resolution and how it scales to the window (expand|shrink|width|height|pixels)\n");
     snprintf(line, sizeof(line), "ui %g %g %s\n", (double)project->ui.width, (double)project->ui.height, cw_ui_scale_mode_name(project->ui.mode));
+    write_text(&out, line);
+    write_text(&out, "# how the hosts view the world: 2d (render2d's camera) or 3d (render3d: Shape3D primitives, a perspective view)\n");
+    snprintf(line, sizeof(line), "renderer %s\n", cw_renderer_name(project->renderer));
     write_text(&out, line);
     cw_file_error ferr;
     bool ok = cw_file_write(project->path, out.data, out.size, &ferr);

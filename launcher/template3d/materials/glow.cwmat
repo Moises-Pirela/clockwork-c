@@ -1,0 +1,19 @@
+cwmaterial 1
+name glow
+texture 
+effect sprite
+shader 
+blend opaque
+filter linear
+wrap clamp
+tint 1 0.85 0.5 1
+tiling 1 1
+offset 0 0
+p0 0 0 0 0
+p1 0 0 0 0
+p2 0 0 0 0
+p3 0 0 0 0
+shading unlit
+specular 0 0 0
+shininess 1
+emissive 0.6 0.4 0.1

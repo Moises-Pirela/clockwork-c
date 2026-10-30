@@ -542,6 +542,202 @@ int main(int argc, char **argv) {
         }
     } else printf("(no second project given: game switching not exercised)\n");
 
+    /* a 3D project: the renderer key, three-axis positions and the engine's Shape3D */
+    if (engine_root) {
+        char project3d[CW_GAME_PATH_CAPACITY];
+        snprintf(project3d, sizeof(project3d), "%s/games/sandbox3d/sandbox3d.cwproj", engine_root);
+        CHECK(!ed_is_3d(&d), "the 2D projects are not 3D");
+        CHECK(ed_open_project(&d, project3d), "open the 3D project: %s", d.status);
+        if (!d.world_ready && engine_root) CHECK(ed_build(&d, "module"), "build the 3D module: %s", d.status);
+        CHECK(d.world_ready, "3D module loaded: %s", d.status);
+        if (d.world_ready) {
+            CHECK(ed_is_3d(&d) && d.project.renderer == CW_RENDERER_3D, "the project is viewed in 3D");
+            size_t before = ed_entity_count(&d);
+            CHECK(before == 25, "its scene opened (%zu entities)", before);
+            float x, y, z;
+            CHECK(cw_reflect_position3(&d.gw.world, 3, &x, &y, &z) && cw_reflect_has_position_z(&d.gw.world, 3) && x == 3 && z == -1, "positions have three axes (%g %g %g)", (double)x, (double)y, (double)z);
+            CHECK(cw_comp_has(&d.gw.world, 3, d.gw.shape3d_ct) && value(&d, 3, "Shape3D", "kind") == CW_SHAPE_CAPSULE && value(&d, 3, "Shape3D", "height") == 1.2f, "the capsule is a Shape3D");
+            ed_select_set(&d, 3);
+            CHECK(ed_move_selection3(&d, 1, 2, 3) == 1, "moved in 3D");
+            ed_commit(&d, "move");
+            CHECK(cw_reflect_position3(&d.gw.world, 3, &x, &y, &z) && x == 4 && y == 1.1f + 2 && z == 2, "all three axes moved (%g %g %g)", (double)x, (double)y, (double)z);
+            CHECK(ed_undo(&d) && cw_reflect_position3(&d.gw.world, 3, &x, &y, &z) && x == 3 && z == -1, "undo restores them");
+            /* prefab spawns take ground coordinates: x and z */
+            cw_entity_id c = ed_place(&d, prefab(&d, "primitives", "cube"), 2, -5);
+            CHECK(c != CW_INVALID_ENTITY && cw_reflect_position3(&d.gw.world, c, &x, &y, &z) && x == 2 && y == 0.5f && z == -5, "a cube placed on the ground at (2, _, -5): %g %g %g", (double)x, (double)y, (double)z);
+            CHECK(cw_comp_has(&d.gw.world, c, d.gw.shape3d_ct) && value(&d, c, "Shape3D", "kind") == CW_SHAPE_CUBE, "with a cube shape");
+            cw_entity_id e = ed_create_entity3(&d, 1, 2, 3);
+            CHECK(e != CW_INVALID_ENTITY && cw_reflect_position3(&d.gw.world, e, &x, &y, &z) && x == 1 && y == 2 && z == 3, "an empty entity at a 3D point");
+            CHECK(ed_add_component(&d, e, d.gw.shape3d_ct) && value(&d, e, "Shape3D", "width") == 1, "Shape3D added from the inspector with its defaults");
+            ed_select_set(&d, c);
+            CHECK(ed_duplicate_selection3(&d, 1, 0, 1) == 1 && cw_reflect_position3(&d.gw.world, ed_primary(&d), &x, &y, &z) && x == 3 && y == 0.5f && z == -4, "a copy offset on the ground (%g %g %g)", (double)x, (double)y, (double)z);
+            CHECK(ed_undo(&d) && ed_entity_count(&d) == before + 2, "undo removes the copy");
+            /* the gizmos: rotation and scale through the semantics */
+            ed_select_set(&d, 4);
+            CHECK(ed_rotate_selection(&d, 0, 0.25f, 0) == 1 && fabs(value(&d, 4, "Shape3D", "ry") - 0.75) < 1e-6, "rotate adds to the Euler angle");
+            CHECK(ed_scale_selection(&d, 2, 1, 0.5f) == 1 && value(&d, 4, "Shape3D", "width") == 4 && value(&d, 4, "Shape3D", "depth") == 0.5f, "scale multiplies the extents");
+            CHECK(ed_scale_selection(&d, 0, 1, 1) == 1 && value(&d, 4, "Shape3D", "width") == 0.01f, "never below 0.01");
+            ed_commit(&d, "transform");
+            CHECK(ed_undo(&d) && value(&d, 4, "Shape3D", "ry") == 0.5f && value(&d, 4, "Shape3D", "width") == 2, "undone as one step");
+            /* brushes: creation, face edits, materials and paint */
+            float lo[3] = {0, 0, 0}, hi[3] = {4, 2, 3};
+            cw_entity_id br = ed_create_brush(&d, lo, hi, cw_asset_id("wall.cwmat"));
+            CHECK(br != CW_INVALID_ENTITY && ed_is_brush(&d, br) && !ed_is_brush(&d, 4), "a brush entity");
+            CHECK(cw_reflect_position3(&d.gw.world, br, &x, &y, &z) && x == 2 && y == 1 && z == 1.5f, "centred in its box (%g %g %g)", (double)x, (double)y, (double)z);
+            float blo[3], bhi[3];
+            CHECK(ed_brush_bounds(&d, br, blo, bhi) && blo[0] == 0 && bhi[0] == 4 && bhi[1] == 2 && bhi[2] == 3, "bounds back");
+            CHECK(value(&d, br, "Brush", "mat_top") == cw_asset_id("wall.cwmat") && value(&d, br, "Brush", "mat_west") == cw_asset_id("wall.cwmat"), "every face took the material");
+            CHECK(ed_brush_set_face(&d, br, CW_FACE_TOP, 5) && ed_brush_bounds(&d, br, blo, bhi) && bhi[1] == 5 && blo[1] == 0 && cw_reflect_position3(&d.gw.world, br, &x, &y, &z) && y == 2.5f, "raising the top keeps the bottom");
+            CHECK(ed_brush_set_face(&d, br, CW_FACE_WEST, 3) && ed_brush_bounds(&d, br, blo, bhi) && blo[0] == 3 && bhi[0] == 4, "moving the west face in");
+            CHECK(ed_brush_set_face(&d, br, CW_FACE_WEST, 10) && ed_brush_bounds(&d, br, blo, bhi) && bhi[0] - blo[0] >= 0.05f && bhi[0] == 4, "a face never crosses its opposite");
+            CHECK(!ed_brush_set_face(&d, 4, CW_FACE_TOP, 1) && !ed_brush_set_face(&d, br, 9, 1), "only brush faces");
+            ed_commit(&d, "resize");
+            CHECK(ed_brush_set_face_material(&d, br, CW_FACE_TOP, cw_asset_id("grass.cwmat")) && value(&d, br, "Brush", "mat_top") == cw_asset_id("grass.cwmat") && value(&d, br, "Brush", "mat_east") == cw_asset_id("wall.cwmat"), "one face retextured");
+            CHECK(ed_brush_set_face_material(&d, br, -1, 0) && value(&d, br, "Brush", "mat_top") == 0 && value(&d, br, "Brush", "mat_east") == 0, "all faces cleared");
+            CHECK(ed_undo(&d) && value(&d, br, "Brush", "mat_top") == cw_asset_id("grass.cwmat"), "undo the texturing");
+            ed_brush_bounds(&d, br, blo, bhi);
+            float corner[3] = {bhi[0], bhi[1], bhi[2]};
+            CHECK(ed_paint(&d, corner, 1, 255, 0, 0, 1) > 0 && value(&d, br, "Brush", "paint") > 0, "painting a corner colours the lattice");
+            ed_commit(&d, "paint");
+            float nowhere[3] = {100, 100, 100};
+            CHECK(ed_paint(&d, nowhere, 1, 255, 0, 0, 1) == 0, "painting thin air touches nothing");
+            CHECK(ed_undo(&d) && value(&d, br, "Brush", "paint") == 0, "undo removes the paint (it lives in the scene text)");
+            CHECK(ed_redo(&d) && value(&d, br, "Brush", "paint") > 0, "redo brings it back");
+            ed_select_set(&d, br);
+            CHECK(ed_paint_clear_selection(&d) == 1 && value(&d, br, "Brush", "paint") == 0, "clear the paint");
+            /* texture alignment per face */
+            cw_brush_align al = cw_brush_align_default();
+            al.shift_u = 0.25f; al.rotation = 45;
+            CHECK(ed_brush_set_face_align(&d, br, CW_FACE_TOP, &al), "align the top face");
+            {
+                const cw_brush *bp = cw_comp_ptr(&d.gw.world, br, d.gw.brush_ct);
+                cw_brush_align back;
+                cw_brush_face_align_get(bp, CW_FACE_TOP, &back);
+                CHECK(back.shift_u == 0.25f && back.rotation == 45 && bp->align.size > 0, "the alignment is stored in the component");
+            }
+            CHECK(ed_undo(&d) && ((const cw_brush *)cw_comp_ptr(&d.gw.world, br, d.gw.brush_ct))->align.size == 0, "undo the alignment");
+            /* wedges and the clip tool */
+            float wlo[3] = {10, 0, 10}, whi[3] = {14, 2, 12};
+            cw_entity_id wedge = ed_create_wedge(&d, wlo, whi, 0, 0, 1);
+            CHECK(wedge != CW_INVALID_ENTITY && cw_brush_clip_count(cw_comp_ptr(&d.gw.world, wedge, d.gw.brush_ct)) == 1, "a wedge has one clip plane");
+            ed_select_set(&d, br);
+            ed_brush_set_face(&d, br, CW_FACE_WEST, 0);   /* back to x 0..4 */
+            ed_commit(&d, "resize");
+            float vertical[3] = {1, 0, 0};
+            size_t before_clip = ed_entity_count(&d);
+            CHECK(ed_clip_selection(&d, vertical, 3.5f, ED_CLIP_KEEP_BACK) == 1 && ed_brush_bounds(&d, br, blo, bhi) && fabsf(bhi[0] - 3.5f) < 1e-4f && fabsf(blo[0]) < 1e-4f, "an axis-aligned clip resizes the brush (x %g..%g)", (double)blo[0], (double)bhi[0]);
+            CHECK(ed_entity_count(&d) == before_clip, "keeping one side creates nothing");
+            float diagonal[3] = {0.70710678f, 0.70710678f, 0};
+            CHECK(ed_clip_selection(&d, diagonal, 0.70710678f * 3.5f, ED_CLIP_KEEP_BOTH) == 2 && ed_entity_count(&d) == before_clip + 1 && d.selection_count == 2, "keeping both sides splits the brush in two (%zu selected)", d.selection_count);
+            {
+                const cw_brush *half_a = cw_comp_ptr(&d.gw.world, d.selection[0], d.gw.brush_ct), *half_b = cw_comp_ptr(&d.gw.world, d.selection[1], d.gw.brush_ct);
+                CHECK(cw_brush_clip_count(half_a) == 1 && cw_brush_clip_count(half_b) == 1, "each half carries the cut");
+            }
+            CHECK(ed_undo(&d) && ed_entity_count(&d) == before_clip, "undo the split");
+            ed_select_set(&d, br);
+            float far_away[3] = {0, 1, 0};
+            CHECK(ed_clip_selection(&d, far_away, 100, ED_CLIP_KEEP_BACK) == 0 && d.status_error, "a plane that misses is reported: %s", d.status);
+            /* texture lock: a moved brush keeps its textures on its surface */
+            ed_select_set(&d, br);
+            {
+                const cw_brush *bp = cw_comp_ptr(&d.gw.world, br, d.gw.brush_ct);
+                cw_brush_align a0;
+                cw_brush_face_align_get(bp, CW_FACE_TOP, &a0);
+                CHECK(d.texture_lock, "texture lock is on by default");
+                ed_move_selection3(&d, 2, 0, 0);
+                cw_brush_align a1;
+                cw_brush_face_align_get(bp, CW_FACE_TOP, &a1);
+                CHECK(fabsf((a1.shift_u - a0.shift_u) + 2.0f / bp->texture_scale) < 1e-5f, "the top texture shifted back by the move (%g)", (double)(a1.shift_u - a0.shift_u));
+                d.texture_lock = false;
+                ed_move_selection3(&d, 1, 0, 0);
+                cw_brush_align a_after;
+                cw_brush_face_align_get(bp, CW_FACE_TOP, &a_after);
+                CHECK(a_after.shift_u == a1.shift_u, "without the lock the alignment stays");
+                d.texture_lock = true;
+                ed_commit(&d, "move");
+            }
+            /* grid snapping and the vertex tool */
+            ed_move_selection3(&d, 0.3f, 0, 0);
+            ed_commit(&d, "move");
+            CHECK(ed_snap_brushes(&d, 0.5f) == 1 && ed_brush_bounds(&d, br, blo, bhi) && fmodf(blo[0], 0.5f) == 0 && fmodf(bhi[0], 0.5f) == 0, "snapped to the 0.5 grid (%g..%g)", (double)blo[0], (double)bhi[0]);
+            {
+                float from[3] = {bhi[0], bhi[1], bhi[2]}, to[3] = {bhi[0] + 1, bhi[1] + 1, bhi[2] + 1};
+                CHECK(ed_brush_move_vertex(&d, br, from, to) && ed_brush_bounds(&d, br, blo, bhi) && bhi[0] == to[0] && bhi[1] == to[1] && bhi[2] == to[2], "dragging a corner grows the brush");
+                ed_commit(&d, "vertex");
+                CHECK(ed_undo(&d) && ed_brush_bounds(&d, br, blo, bhi) && bhi[0] == from[0], "undo the vertex move");
+                /* a drag: many small moves, each from where the vertex is now, off the grid and through the camera's tilted plane */
+                float cur[3] = {bhi[0], bhi[1], bhi[2]}, lo0[3] = {blo[0], blo[1], blo[2]};
+                bool ok = true;
+                for (int step = 0; step < 40 && ok; ++step) {
+                    float next[3] = {cur[0] + 0.0137f, cur[1] + 0.0291f, cur[2] + 0.0113f};
+                    ok = ed_brush_move_vertex(&d, br, cur, next);
+                    memcpy(cur, next, sizeof(cur));
+                }
+                CHECK(ok && ed_brush_bounds(&d, br, blo, bhi) && fabsf(bhi[1] - cur[1]) < 1e-4f && fabsf(bhi[0] - cur[0]) < 1e-4f && fabsf(blo[1] - lo0[1]) < 1e-4f && fabsf(blo[0] - lo0[0]) < 1e-4f,
+                      "a forty-step drag follows the corner (top %g, was %g; bottom %g)", (double)bhi[1], (double)cur[1], (double)blo[1]);
+                ed_commit(&d, "vertex");
+                CHECK(ed_undo(&d) && ed_brush_bounds(&d, br, blo, bhi) && bhi[0] == from[0], "undo the drag");
+            }
+            /* CSG: hollow the brush, then carve the walls with a cutter */
+            ed_select_set(&d, br);
+            size_t before_csg = ed_entity_count(&d);
+            CHECK(ed_csg_hollow(&d, 0.25f) == 6 && ed_entity_count(&d) == before_csg + 5 && d.selection_count == 6, "hollowed into six walls (%zu entities, %zu selected)", ed_entity_count(&d), d.selection_count);
+            CHECK(ed_undo(&d) && ed_entity_count(&d) == before_csg && ed_is_brush(&d, br), "undo the hollowing");
+            ed_brush_bounds(&d, br, blo, bhi);
+            float clo[3] = {(blo[0] + bhi[0]) * 0.5f - 0.25f, blo[1] + 0.5f, (blo[2] + bhi[2]) * 0.5f - 0.25f}, chi[3] = {(blo[0] + bhi[0]) * 0.5f + 0.25f, bhi[1] + 1, (blo[2] + bhi[2]) * 0.5f + 0.25f};
+            cw_entity_id cutter = ed_create_brush(&d, clo, chi, 0);
+            CHECK(cutter != CW_INVALID_ENTITY && d.selection_count == 1, "a column through the brush, selected");
+            size_t with_cutter = ed_entity_count(&d);
+            size_t pieces_made = ed_csg_subtract(&d);
+            CHECK(pieces_made == 5 && ed_entity_count(&d) == with_cutter - 2 + 5 && !cw_world_is_valid(&d.gw.world, cutter) && !cw_world_is_valid(&d.gw.world, br), "a column into the brush leaves five pieces (four sides and the floor under it) and removes the cutter and the carved brush (%zu pieces, %zu -> %zu entities): %s", pieces_made, with_cutter, ed_entity_count(&d), d.status);
+            CHECK(ed_undo(&d) && cw_world_is_valid(&d.gw.world, cutter) && cw_world_is_valid(&d.gw.world, br), "undo the subtraction");
+            ed_select_set(&d, cutter);
+            ed_move_selection3(&d, 100, 0, 0);
+            ed_commit(&d, "move");
+            CHECK(ed_csg_subtract(&d) == 0 && d.status_error && cw_world_is_valid(&d.gw.world, cutter), "a cutter touching nothing is kept and reported");
+            ed_delete_selection(&d);
+            ed_select_set(&d, wedge);
+            ed_delete_selection(&d);
+            /* decals: placed on a surface, pitched and yawed so they project against its normal */
+            {
+                size_t before_decal = ed_entity_count(&d);
+                float floor_point[3] = {1, 0, 2}, wall_normal[3] = {0, 0, 1}, wall_point[3] = {0, 1.5f, -7};
+                cw_entity_id flat = ed_create_decal(&d, floor_point, NULL, 2, 0.5f, cw_asset_id("scorch.cwmat"));
+                CHECK(flat != CW_INVALID_ENTITY && ed_is_decal(&d, flat) && ed_entity_count(&d) == before_decal + 1 && d.selection_count == 1 && d.selection[0] == flat, "a decal entity, selected");
+                CHECK(value(&d, flat, "Decal3D", "width") == 2 && value(&d, flat, "Decal3D", "height") == 2 && value(&d, flat, "Decal3D", "depth") == 0.5f && value(&d, flat, "Decal3D", "rx") == 0
+                      && value(&d, flat, "Position", "x") == 1 && value(&d, flat, "Position", "z") == 2, "flat on the ground at the point, the size across and the depth along the projection");
+                CHECK(value(&d, flat, "Decal3D", "material") == (float)cw_asset_id("scorch.cwmat") || cw_comp_has(&d.gw.world, flat, d.gw.decal3d_ct), "with the material");
+                cw_entity_id wall = ed_create_decal(&d, wall_point, wall_normal, 1, 0.25f, 0);
+                CHECK(wall != CW_INVALID_ENTITY && fabs(value(&d, wall, "Decal3D", "rx") - 1.5707964f) < 1e-4f && fabs(value(&d, wall, "Decal3D", "ry")) < 1e-4f, "on a wall facing +z: pitched 90 degrees (rx %g)", (double)value(&d, wall, "Decal3D", "rx"));
+                float east_normal[3] = {1, 0, 0};
+                cw_entity_id east = ed_create_decal(&d, wall_point, east_normal, 1, 0.25f, 0);
+                CHECK(east != CW_INVALID_ENTITY && fabs(value(&d, east, "Decal3D", "rx") - 1.5707964f) < 1e-4f && fabs(value(&d, east, "Decal3D", "ry") - 1.5707964f) < 1e-4f, "on a wall facing +x: pitched and yawed 90 degrees");
+                ed_scale_selection(&d, 2, 1, 1);   /* the gizmo's x handle widens it: width carries CW_SEM_SIZE_X */
+                CHECK(value(&d, east, "Decal3D", "width") == 2 && value(&d, east, "Decal3D", "height") == 1, "the scale gizmo drives its width");
+                CHECK(ed_undo(&d) && ed_undo(&d) && ed_undo(&d) && ed_entity_count(&d) == before_decal && !cw_world_is_valid(&d.gw.world, flat), "undo the three decals");
+            }
+            /* the renderer key: the project can be viewed in 2D and back; it saves into the .cwproj */
+            CHECK(ed_set_renderer(&d, CW_RENDERER_2D) && !ed_is_3d(&d) && d.project.renderer == CW_RENDERER_2D, "switched to the 2D view: %s", d.status);
+            {
+                cw_project reread;
+                char perr[256];
+                CHECK(cw_project_load(&reread, project3d, perr, sizeof(perr)) && reread.renderer == CW_RENDERER_2D, "the project file says 2d");
+            }
+            CHECK(ed_set_renderer(&d, CW_RENDERER_3D) && ed_is_3d(&d), "and back to 3D");
+            {
+                cw_project reread;
+                char perr[256];
+                CHECK(cw_project_load(&reread, project3d, perr, sizeof(perr)) && reread.renderer == CW_RENDERER_3D, "the project file says 3d again");
+            }
+            ed_select_set(&d, br);
+            CHECK(ed_delete_selection(&d) == 1, "delete the brush");
+            CHECK(ed_play(&d) && ed_frame(&d, 0.5f) > 0, "it simulates");
+            CHECK(value(&d, 4, "Shape3D", "ry") != 0.5f, "the spin system turned the slab");
+            ed_stop(&d);
+            CHECK(value(&d, 4, "Shape3D", "ry") == 0.5f && ed_entity_count(&d) == before + 2, "stop restores");
+        }
+    } else printf("(no engine root given: the 3D project not exercised)\n");
+
     ed_shutdown(&d);
     if (failures) { printf("%d of %d checks failed\n", failures, checks); return 1; }
     printf("OK: %d editor checks passed\n", checks);

@@ -25,8 +25,9 @@ size_t cw_field_size(cw_field_type type) {
 }
 static bool field_valid(const cw_field *f, size_t size) {
     if (!f->name || !*f->name || f->type < 0 || f->type >= CW_FIELD_TYPES) return false;
-    size_t n = f->type == CW_FIELD_STRING ? f->capacity : cw_field_size(f->type);
+    size_t n = f->type == CW_FIELD_STRING ? f->capacity : (f->type == CW_FIELD_BYTES ? f->capacity + sizeof(uint16_t) : cw_field_size(f->type));
     if (f->type == CW_FIELD_STRING && (f->capacity < 2 || f->capacity > 4096)) return false;
+    if (f->type == CW_FIELD_BYTES && (f->capacity < 1 || f->capacity > CW_BYTES_MAX)) return false;
     if (f->offset > size || size - f->offset < n) return false;
     if ((f->type == CW_FIELD_ENUM || f->type == CW_FIELD_FLAGS)
         && (!f->names || !f->name_count || f->name_count > 8u * (f->type == CW_FIELD_FLAGS ? 1u : 32u))) return false;
@@ -78,6 +79,68 @@ static size_t bounded_len(const char *s, size_t capacity) { const char *e = memc
 static const void *at(const void *value, const cw_field *f) { return (const unsigned char *)value + f->offset; }
 static void *at_mut(void *value, const cw_field *f) { return (unsigned char *)value + f->offset; }
 static bool ranged(const cw_field *f) { return f->min < f->max; }
+typedef CW_BYTES(1) blob_header;   /* the layout every CW_BYTES(N) shares: the size, then the data */
+static uint16_t blob_size(const cw_field *f, const void *value) {
+    uint16_t n = ((const blob_header *)at(value, f))->size;
+    return n > f->capacity ? (uint16_t)f->capacity : n;
+}
+static uint8_t *blob_data(const cw_field *f, void *value) { return ((blob_header *)at_mut(value, f))->data; }
+static void blob_set(const cw_field *f, void *value, const void *data, size_t n) {
+    blob_header *b = at_mut(value, f);
+    if (n > f->capacity) n = f->capacity;
+    b->size = (uint16_t)n;
+    if (n) memcpy(b->data, data, n);
+    memset(b->data + n, 0, f->capacity - n);   /* deterministic bytes beyond the size */
+}
+static const char b64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+size_t cw_base64_encode(const void *data, size_t size, char *out, size_t capacity) {
+    const uint8_t *p = data;
+    size_t needed = (size + 2) / 3 * 4;
+    if (!out || capacity <= needed) { if (out && capacity) out[0] = 0; return 0; }
+    size_t o = 0;
+    for (size_t i = 0; i < size; i += 3) {
+        uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < size ? (uint32_t)p[i + 1] << 8 : 0) | (i + 2 < size ? p[i + 2] : 0);
+        out[o++] = b64_chars[(v >> 18) & 63];
+        out[o++] = b64_chars[(v >> 12) & 63];
+        out[o++] = i + 1 < size ? b64_chars[(v >> 6) & 63] : '=';
+        out[o++] = i + 2 < size ? b64_chars[v & 63] : '=';
+    }
+    out[o] = 0;
+    return o;
+}
+static int b64_value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+size_t cw_base64_decode(const char *text, void *out, size_t capacity) {
+    if (!text) return SIZE_MAX;
+    uint8_t *dst = out;
+    size_t len = strlen(text), o = 0;
+    if (len % 4) return SIZE_MAX;
+    for (size_t i = 0; i < len; i += 4) {
+        int v[4];
+        int pad = 0;
+        for (int k = 0; k < 4; ++k) {
+            char c = text[i + k];
+            if (c == '=' && i + 4 == len && k >= 2) { v[k] = 0; ++pad; continue; }
+            if (pad) return SIZE_MAX;   /* padding only at the very end */
+            v[k] = b64_value(c);
+            if (v[k] < 0) return SIZE_MAX;
+        }
+        uint32_t bits = (uint32_t)v[0] << 18 | (uint32_t)v[1] << 12 | (uint32_t)v[2] << 6 | (uint32_t)v[3];
+        uint8_t bytes[3] = {(uint8_t)(bits >> 16), (uint8_t)(bits >> 8), (uint8_t)bits};
+        for (int k = 0; k < 3 - pad; ++k) {
+            if (o >= capacity) return SIZE_MAX;
+            if (dst) dst[o] = bytes[k];
+            ++o;
+        }
+    }
+    return o;
+}
 
 double cw_field_get(const cw_field *f, const void *value) {
     if (!f || !value) return 0;
@@ -89,6 +152,7 @@ double cw_field_get(const cw_field *f, const void *value) {
         case CW_FIELD_F32: return *(const float *)at(value, f);
         case CW_FIELD_ENTITY: return (double)*(const cw_entity_id *)at(value, f);
         case CW_FIELD_STRING: return (double)bounded_len((const char *)at(value, f), f->capacity);
+        case CW_FIELD_BYTES: return blob_size(f, value);
         default: return 0;
     }
 }
@@ -141,7 +205,7 @@ float cw_field_step(const cw_field *f) {
     if (!f) return 1;
     if (f->step > 0) return f->step;
     switch (f->type) {
-        case CW_FIELD_F32: return f->semantic == CW_SEM_ANGLE ? 0.0872665f : (ranged(f) && f->max - f->min <= 10 ? 0.1f : 1.0f);
+        case CW_FIELD_F32: return cw_sem_is_angle(f->semantic) ? 0.0872665f : (ranged(f) && f->max - f->min <= 10 ? 0.1f : 1.0f);
         default: return 1;
     }
 }
@@ -176,6 +240,7 @@ bool cw_field_check(const cw_field *f, const void *value) {
             break;
         case CW_FIELD_ENTITY: if (v < -1) return false; break;
         case CW_FIELD_STRING: return memchr(at(value, f), 0, f->capacity) != NULL;   /* terminated */
+        case CW_FIELD_BYTES: return ((const blob_header *)at(value, f))->size <= f->capacity;
         default: break;
     }
     return !ranged(f) || (v >= f->min && v <= f->max);
@@ -206,6 +271,7 @@ size_t cw_field_format(const cw_field *f, const void *value, char *out, size_t c
         case CW_FIELD_F32: n = snprintf(out, capacity, "%.9g", (double)*(const float *)at(value, f)); break;
         case CW_FIELD_ENTITY: n = snprintf(out, capacity, "%lld", (long long)*(const cw_entity_id *)at(value, f)); break;
         case CW_FIELD_STRING: n = snprintf(out, capacity, "%.*s", (int)f->capacity, (const char *)at(value, f)); break;
+        case CW_FIELD_BYTES: n = (int)cw_base64_encode(((const blob_header *)at(value, f))->data, blob_size(f, value), out, capacity); break;
         case CW_FIELD_ENUM: {
             unsigned v = *(const uint8_t *)at(value, f);
             n = v < f->name_count ? snprintf(out, capacity, "%s", f->names[v]) : snprintf(out, capacity, "%u", v);
@@ -248,6 +314,13 @@ bool cw_field_parse(const cw_field *f, void *value, const char *text) {
             if (n >= f->capacity) n = f->capacity - 1;
             memcpy(dst, text, n);
             dst[n] = 0;
+            return true;
+        }
+        case CW_FIELD_BYTES: {
+            uint8_t bytes[CW_BYTES_MAX];
+            size_t n = cw_base64_decode(text, bytes, f->capacity);
+            if (n == SIZE_MAX) return false;
+            blob_set(f, value, bytes, n);
             return true;
         }
         case CW_FIELD_BOOL:
@@ -318,6 +391,12 @@ bool cw_reflect_marshal(cw_world *w, cw_entity_id id, cw_component_id ct, void *
                 cw_writer_bytes(&out, at(value, f), n);
                 break;
             }
+            case CW_FIELD_BYTES: {
+                uint16_t n = blob_size(f, value);
+                cw_writer_u16(&out, n);
+                cw_writer_bytes(&out, ((const blob_header *)at(value, f))->data, n);
+                break;
+            }
             default: return false;
         }
     }
@@ -350,6 +429,15 @@ bool cw_reflect_unmarshal(cw_world *w, cw_entity_id id, cw_component_id ct, cons
                 if (n >= f->capacity) { in.error = true; break; }   /* longer than the field: not ours */
                 if (!cw_reader_bytes(&in, dst, n)) break;
                 dst[n] = 0;
+                break;
+            }
+            case CW_FIELD_BYTES: {
+                uint16_t n = 0;
+                cw_reader_u16(&in, &n);
+                if (n > f->capacity) { in.error = true; break; }
+                if (!cw_reader_bytes(&in, blob_data(f, value), n)) break;
+                ((blob_header *)at_mut(value, f))->size = n;
+                memset(blob_data(f, value) + n, 0, f->capacity - n);
                 break;
             }
             default: break;
@@ -397,6 +485,57 @@ bool cw_reflect_set_position(cw_world *w, cw_entity_id id, float x, float y) {
     cw_comp_touch(w, id, cx);
     if (cy != cx) cw_comp_touch(w, id, cy);
     return true;
+}
+bool cw_reflect_position3(cw_world *w, cw_entity_id id, float *x, float *y, float *z) {
+    if (!cw_reflect_position(w, id, x, y)) return false;
+    cw_component_id cz;
+    const cw_field *fz;
+    if (z) *z = find_semantic(w, id, CW_SEM_POSITION_Z, &cz, &fz) ? (float)cw_field_get(fz, cw_comp_ptr(w, id, cz)) : 0;
+    return true;
+}
+bool cw_reflect_set_position3(cw_world *w, cw_entity_id id, float x, float y, float z) {
+    if (!cw_reflect_set_position(w, id, x, y)) return false;
+    cw_component_id cz;
+    const cw_field *fz;
+    if (find_semantic(w, id, CW_SEM_POSITION_Z, &cz, &fz)) {
+        cw_field_set(fz, cw_comp_ptr(w, id, cz), z);
+        cw_comp_touch(w, id, cz);
+    }
+    return true;
+}
+static bool triple_get(cw_world *w, cw_entity_id id, cw_field_semantic first, float fallback, float *a, float *b, float *c) {
+    float *out[3] = {a, b, c};
+    bool any = false;
+    for (int i = 0; i < 3; ++i) {
+        cw_component_id ct;
+        const cw_field *f;
+        bool found = find_semantic(w, id, (cw_field_semantic)(first + i), &ct, &f);
+        if (out[i]) *out[i] = found ? (float)cw_field_get(f, cw_comp_ptr(w, id, ct)) : fallback;
+        any = any || found;
+    }
+    return any;
+}
+static bool triple_set(cw_world *w, cw_entity_id id, cw_field_semantic first, float a, float b, float c) {
+    float in[3] = {a, b, c};
+    bool any = false;
+    for (int i = 0; i < 3; ++i) {
+        cw_component_id ct;
+        const cw_field *f;
+        if (!find_semantic(w, id, (cw_field_semantic)(first + i), &ct, &f)) continue;
+        cw_field_set(f, cw_comp_ptr(w, id, ct), in[i]);
+        cw_comp_touch(w, id, ct);
+        any = true;
+    }
+    return any;
+}
+bool cw_reflect_rotation3(cw_world *w, cw_entity_id id, float *rx, float *ry, float *rz) { return triple_get(w, id, CW_SEM_ROTATION_X, 0, rx, ry, rz); }
+bool cw_reflect_set_rotation3(cw_world *w, cw_entity_id id, float rx, float ry, float rz) { return triple_set(w, id, CW_SEM_ROTATION_X, rx, ry, rz); }
+bool cw_reflect_size3(cw_world *w, cw_entity_id id, float *sx, float *sy, float *sz) { return triple_get(w, id, CW_SEM_SIZE_X, 1, sx, sy, sz); }
+bool cw_reflect_set_size3(cw_world *w, cw_entity_id id, float sx, float sy, float sz) { return triple_set(w, id, CW_SEM_SIZE_X, sx, sy, sz); }
+bool cw_reflect_has_position_z(cw_world *w, cw_entity_id id) {
+    cw_component_id cz;
+    const cw_field *fz;
+    return find_semantic(w, id, CW_SEM_POSITION_Z, &cz, &fz);
 }
 float cw_reflect_radius(cw_world *w, cw_entity_id id, float fallback) {
     cw_component_id ct;

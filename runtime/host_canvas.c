@@ -64,6 +64,205 @@ static void c_pick(void *impl, cw_entity_id id, float x, float y, float r) {
     if (hc->pickable) r2d_pick_circle((uint64_t)id, r2d_v2(x, y), r);
 }
 
+/* --- the 3D view: materials, shapes, lights, brushes --- */
+const host_material3d *host_canvas_material3d(host_canvas *hc, uint32_t id) {
+    if (!id) return NULL;
+    for (size_t i = 0; i < hc->material3d_count; ++i) if (hc->materials3d[i].id == id) return &hc->materials3d[i];
+    if (hc->material3d_count == hc->material3d_capacity) {
+        hc->material3d_capacity = hc->material3d_capacity ? hc->material3d_capacity * 2 : 16;
+        hc->materials3d = realloc(hc->materials3d, hc->material3d_capacity * sizeof(*hc->materials3d));
+        if (!hc->materials3d) { fputs("host_canvas: out of memory\n", stderr); abort(); }
+    }
+    host_material3d *m = &hc->materials3d[hc->material3d_count++];
+    memset(m, 0, sizeof(*m));
+    m->id = id;
+    m->material = r3d_material_default();
+    const host_material *hm = host_canvas_material(hc, id);   /* the same .cwmat file, parsed once */
+    if (!hm || hm->missing) { m->missing = true; snprintf(m->error, sizeof(m->error), "%s", hm ? hm->error : "unknown material asset"); return m; }
+    const r2d_material *src = &hm->material;
+    memcpy(m->material.tint, src->tint, sizeof(m->material.tint));
+    memcpy(m->material.tiling, src->tiling, sizeof(m->material.tiling));
+    memcpy(m->material.offset, src->offset, sizeof(m->material.offset));
+    memcpy(m->material.specular, src->specular, sizeof(m->material.specular));
+    memcpy(m->material.emissive, src->emissive, sizeof(m->material.emissive));
+    m->material.shininess = src->shininess;
+    m->material.unlit = src->unlit;
+    m->material.nearest = src->nearest;
+    m->material.repeat = src->repeat;
+    if (hm->texture) {
+        char path[CW_ASSET_PATH_CAPACITY];
+        r2d_image img;
+        if (!cw_assets_path(hc->assets, hm->texture, path, sizeof(path))) snprintf(m->error, sizeof(m->error), "unknown image asset");
+        else if (!r2d_image_load(&img, path, m->error, sizeof(m->error))) { /* error set */ }
+        else {
+            if (!r3d_texture_create(&m->texture, img.width, img.height, img.pixels)) snprintf(m->error, sizeof(m->error), "cannot upload the texture");
+            r2d_image_free(&img);
+        }
+        m->material.texture = m->texture;
+    }
+    return m;
+}
+static void c_shape3d(void *impl, const cw_canvas_shape3d *shape) {
+    host_canvas *hc = impl;
+    if (!hc->view3d || !hc->view3d->ready || !shape) return;
+    if (hc->shape_count == hc->shape_capacity) {
+        hc->shape_capacity = hc->shape_capacity ? hc->shape_capacity * 2 : 256;
+        hc->shapes = realloc(hc->shapes, hc->shape_capacity * sizeof(*hc->shapes));
+        if (!hc->shapes) { fputs("host_canvas: out of memory\n", stderr); abort(); }
+    }
+    hc->shapes[hc->shape_count++] = *shape;
+    r3d_primitive p = host_view3d_primitive(shape);
+    const host_material3d *m = shape->material ? host_canvas_material3d(hc, shape->material) : NULL;
+    r3d_material missing;
+    if (m && m->missing) {   /* a visible placeholder, like the sprites' magenta */
+        missing = r3d_material_default();
+        missing.tint[0] = 1; missing.tint[1] = 0; missing.tint[2] = 1;
+        p.material = &missing;
+    } else if (m) p.material = &m->material;
+    if (!hc->pickable) p.id = R3D_ID_NONE;
+    r3d_draw_primitive(&p);
+}
+r3d_decal host_canvas_decal(host_canvas *hc, const cw_canvas_decal3d *d) {
+    r3d_decal r;
+    memset(&r, 0, sizeof(r));
+    r.position = r3d_v3(d->x, d->y, d->z);
+    r.rotation = r3d_v3(d->rx, d->ry, d->rz);
+    r.size = r3d_v3(d->sx, d->sy, d->sz);
+    r.color = host_view3d_color(d->color);
+    r.max_angle = d->max_angle;
+    r.id = hc->pickable ? (uint64_t)d->id : R3D_ID_NONE;
+    const host_material3d *m = d->material ? host_canvas_material3d(hc, d->material) : NULL;
+    if (m && m->missing) {   /* the placeholder magenta, so a missing material is noticed */
+        r.color = r3d_rgba(255, 0, 255, d->color.a);
+        r.material = NULL;
+    } else if (m) r.material = &m->material;
+    return r;
+}
+static void c_decal3d(void *impl, const cw_canvas_decal3d *d) {
+    host_canvas *hc = impl;
+    if (!hc->view3d || !hc->view3d->ready || !d) return;
+    if (hc->decal_count == hc->decal_capacity) {
+        hc->decal_capacity = hc->decal_capacity ? hc->decal_capacity * 2 : 64;
+        hc->decals = realloc(hc->decals, hc->decal_capacity * sizeof(*hc->decals));
+        if (!hc->decals) { fputs("host_canvas: out of memory\n", stderr); abort(); }
+    }
+    hc->decals[hc->decal_count++] = *d;
+    r3d_decal decal = host_canvas_decal(hc, d);
+    r3d_draw_decal(&decal);
+}
+static void c_light3d(void *impl, const cw_canvas_light3d *l) {
+    host_canvas *hc = impl;
+    if (!hc->view3d || !hc->view3d->ready || !l) return;
+    if (l->kind == CW_LIGHT_AMBIENT) { r3d_add_ambient(host_view3d_color(l->color), l->intensity); return; }
+    r3d_light light;
+    memset(&light, 0, sizeof(light));
+    light.kind = l->kind == CW_LIGHT_DIRECTIONAL ? R3D_LIGHT_DIRECTIONAL : (l->kind == CW_LIGHT_SPOT ? R3D_LIGHT_SPOT : R3D_LIGHT_POINT);
+    light.position = r3d_v3(l->x, l->y, l->z);
+    light.direction = r3d_v3(l->dx, l->dy, l->dz);
+    light.color = host_view3d_color(l->color);
+    light.intensity = l->intensity;
+    light.range = l->range;
+    light.cone = l->cone;
+    light.shadows = l->shadows;
+    r3d_add_light(&light);
+}
+/* The sky's six images as one cube map; a failure (missing image, faces of
+ * different sizes) leaves the gradient and is reported once. */
+static void sky_cube(host_canvas *hc, const uint32_t ids[6]) {
+    if (memcmp(ids, hc->sky_ids, sizeof(hc->sky_ids)) == 0) return;
+    memcpy(hc->sky_ids, ids, sizeof(hc->sky_ids));
+    r3d_texture_destroy(&hc->sky_cube);
+    hc->sky_failed = false;
+    hc->sky_error[0] = 0;
+    if (!ids[0]) return;
+    r2d_image faces[6];
+    memset(faces, 0, sizeof(faces));
+    int loaded = 0, size = 0;
+    for (; loaded < 6; ++loaded) {
+        char path[CW_ASSET_PATH_CAPACITY];
+        if (!cw_assets_path(hc->assets, ids[loaded], path, sizeof(path))) { snprintf(hc->sky_error, sizeof(hc->sky_error), "sky face %d: unknown image asset", loaded); break; }
+        if (!r2d_image_load(&faces[loaded], path, hc->sky_error, sizeof(hc->sky_error))) break;
+        if (faces[loaded].width != faces[loaded].height || (size && faces[loaded].width != size)) {
+            snprintf(hc->sky_error, sizeof(hc->sky_error), "sky faces must be squares of one size (face %d is %dx%d)", loaded, faces[loaded].width, faces[loaded].height);
+            ++loaded;
+            break;
+        }
+        size = faces[loaded].width;
+    }
+    if (loaded == 6) {
+        const void *pixels[6];
+        for (int i = 0; i < 6; ++i) pixels[i] = faces[i].pixels;
+        if (!r3d_texture_create_cube(&hc->sky_cube, size, pixels)) snprintf(hc->sky_error, sizeof(hc->sky_error), "cannot upload the sky's cube map");
+    }
+    for (int i = 0; i < loaded; ++i) r2d_image_free(&faces[i]);
+    if (hc->sky_error[0]) { hc->sky_failed = true; fprintf(stderr, "host_canvas: %s\n", hc->sky_error); }
+}
+static void c_sky3d(void *impl, const cw_canvas_sky3d *s) {
+    host_canvas *hc = impl;
+    if (!hc->view3d || !hc->view3d->ready || !s) return;
+    sky_cube(hc, s->images);
+    r3d_sky sky;
+    memset(&sky, 0, sizeof(sky));
+    sky.zenith = host_view3d_color(s->zenith);
+    sky.horizon = host_view3d_color(s->horizon);
+    sky.ground = host_view3d_color(s->ground);
+    sky.sun_size = s->sun_size;
+    sky.sun_intensity = s->sun_intensity;
+    if (!hc->sky_failed) sky.cube = hc->sky_cube;
+    r3d_set_sky(&sky);
+}
+static void c_brush3d(void *impl, const cw_canvas_brush *b) {
+    host_canvas *hc = impl;
+    if (!hc->view3d || !hc->view3d->ready || !b || !b->brush) return;
+    float center[3] = {b->x, b->y, b->z};
+    if (hc->pickable && b->id != CW_INVALID_ENTITY) {   /* the solid's planes, so clipped brushes pick exactly */
+        cw_plane planes[CW_BRUSH_MAX_FACES];
+        r3d_plane rp[CW_BRUSH_MAX_FACES];
+        int n = cw_brush_planes(b->brush, center, planes);
+        for (int i = 0; i < n; ++i) { rp[i].n = r3d_v3(planes[i].n[0], planes[i].n[1], planes[i].n[2]); rp[i].d = planes[i].d; }
+        r3d_pick_convex((uint64_t)b->id, rp, n);
+    }
+    static cw_brush_vertex verts[CW_BRUSH_FACE_MAX_VERTICES];
+    static uint32_t indices[CW_BRUSH_FACE_MAX_INDICES];
+    static r3d_vertex out[CW_BRUSH_FACE_MAX_VERTICES];
+    int faces = cw_brush_face_count(b->brush);
+    for (int face = 0; face < faces; ++face) {
+        size_t ni = 0, n = cw_brush_face_mesh(b->brush, center, face, verts, indices, &ni);
+        if (!n || !ni) continue;
+        for (size_t i = 0; i < n; ++i) {
+            out[i].x = verts[i].x; out[i].y = verts[i].y; out[i].z = verts[i].z; out[i].cap = 0;
+            out[i].nx = verts[i].nx; out[i].ny = verts[i].ny; out[i].nz = verts[i].nz;
+            out[i].u = verts[i].u; out[i].v = verts[i].v;
+            out[i].rgba[0] = verts[i].r; out[i].rgba[1] = verts[i].g; out[i].rgba[2] = verts[i].b; out[i].rgba[3] = verts[i].a;
+        }
+        uint32_t asset = b->brush->material[face];
+        const host_material3d *m = asset ? host_canvas_material3d(hc, asset) : NULL;
+        r3d_material missing;
+        const r3d_material *use = NULL;
+        if (m && m->missing) { missing = r3d_material_default(); missing.tint[0] = 1; missing.tint[1] = 0; missing.tint[2] = 1; use = &missing; }
+        else if (m) use = &m->material;
+        r3d_draw_mesh(out, (int)n, indices, (int)ni, use, r3d_rgb(255, 255, 255), false);
+    }
+}
+void host_canvas_set_view3d(host_canvas *hc, host_view3d *view) {
+    hc->view3d = view;
+    hc->canvas.shape3d = view ? c_shape3d : NULL;
+    hc->canvas.light3d = view ? c_light3d : NULL;
+    hc->canvas.brush3d = view ? c_brush3d : NULL;
+    hc->canvas.sky3d = view ? c_sky3d : NULL;
+    hc->canvas.decal3d = view ? c_decal3d : NULL;
+}
+const cw_canvas_shape3d *host_canvas_find_shape(const host_canvas *hc, cw_entity_id id) {
+    for (size_t i = hc->shape_count; i-- > 0;)
+        if (hc->shapes[i].id == id) return &hc->shapes[i];
+    return NULL;
+}
+const cw_canvas_decal3d *host_canvas_find_decal(const host_canvas *hc, cw_entity_id id) {
+    for (size_t i = hc->decal_count; i-- > 0;)
+        if (hc->decals[i].id == id) return &hc->decals[i];
+    return NULL;
+}
+
 /* --- asset-backed resources --- */
 static host_texture *texture_entry(host_canvas *hc, uint32_t id) {
     for (size_t i = 0; i < hc->texture_count; ++i) if (hc->textures[i].id == id) return &hc->textures[i];
@@ -128,7 +327,11 @@ void host_canvas_set_assets(host_canvas *hc, const cw_assets *assets) { hc->asse
 static void drop_caches(host_canvas *hc) {
     for (size_t i = 0; i < hc->texture_count; ++i) r2d_texture_destroy(&hc->textures[i].texture);
     for (size_t i = 0; i < hc->shader_count; ++i) r2d_shader_destroy(&hc->shaders[i].shader);
-    hc->texture_count = hc->shader_count = hc->material_count = 0;
+    for (size_t i = 0; i < hc->material3d_count; ++i) r3d_texture_destroy(&hc->materials3d[i].texture);
+    hc->texture_count = hc->shader_count = hc->material_count = hc->material3d_count = 0;
+    r3d_texture_destroy(&hc->sky_cube);
+    memset(hc->sky_ids, 0, sizeof(hc->sky_ids));   /* the sky reloads its faces */
+    hc->sky_failed = false;
     hc->reload_pending = false;
 }
 void host_canvas_reload(host_canvas *hc) { hc->reload_pending = true; }
@@ -238,10 +441,15 @@ void host_canvas_destroy(host_canvas *hc) {
     free(hc->textures);
     free(hc->shaders);
     free(hc->picks);
+    free(hc->shapes);
+    free(hc->decals);
+    free(hc->materials3d);
     memset(hc, 0, sizeof(*hc));
 }
 void host_canvas_begin(host_canvas *hc) {
     hc->pick_count = 0;
+    hc->shape_count = 0;
+    hc->decal_count = 0;
     if (hc->reload_pending) drop_caches(hc);
 }
 const host_pick *host_canvas_find(const host_canvas *hc, cw_entity_id id) {

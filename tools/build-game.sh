@@ -23,7 +23,7 @@ cc=${CC:-cc}
 project_dir=$(cd "$(dirname "$project")" && pwd)
 mkdir -p "$(dirname "$out")"
 cflags="-std=c11 -O2 -Wall -Wextra -I$root/include ${CW_CFLAGS:-}"
-engine_sources="$root/src/clockwork.c $root/src/cw_sim.c $root/src/cw_commands.c $root/src/cw_bytes.c $root/src/cw_snapshot.c $root/src/cw_file.c $root/src/cw_reflect.c $root/src/cw_scene.c $root/src/cw_game.c $root/src/cw_assets.c $root/src/cw_anim.c $root/src/cw_ui.c"
+engine_sources="$root/src/clockwork.c $root/src/cw_sim.c $root/src/cw_commands.c $root/src/cw_bytes.c $root/src/cw_snapshot.c $root/src/cw_file.c $root/src/cw_reflect.c $root/src/cw_scene.c $root/src/cw_game.c $root/src/cw_assets.c $root/src/cw_anim.c $root/src/cw_ui.c $root/src/cw_brush.c"
 run() { echo "+ $*"; "$@"; }
 
 case $mode in
@@ -35,6 +35,7 @@ module)
 export)
     sokol=$root/third_party/sokol
     render2d="$root/render2d/render2d.c $root/render2d/r2d_particles.c $root/render2d/r2d_effects.c $root/render2d/r2d_tunables.c $root/render2d/r2d_post_params.c $root/render2d/r2d_post.c $root/render2d/r2d_post_shaders.c $root/render2d/r2d_shadow.c $root/render2d/r2d_lighting.c $root/render2d/r2d_quality.c $root/render2d/r2d_image.c $root/render2d/r2d_material.c $root/render2d/r2d_sprite.c $root/render2d/r2d_sprite_shaders.c"
+    render3d="$root/render3d/render3d.c $root/render3d/r3d_mesh.c $root/render3d/r3d_shaders.c"
     objdir=$(dirname "$out")/obj
     mkdir -p "$objdir"
     if [ "$(uname -s)" = Darwin ]; then
@@ -54,7 +55,7 @@ export)
         libs="$libs -lpthread -ldl"
     fi
     # shellcheck disable=SC2086
-    run $cc $cflags $gui_flags -DCW_STATIC_GAME -I"$root/render2d" -I"$root/runtime" -I"$sokol" "$root/runtime/player.c" "$root/runtime/host_canvas.c" $render2d $engine_sources "$@" "$objdir/sokol_impl.o" -o "$out" -lm $libs
+    run $cc $cflags $gui_flags -DCW_STATIC_GAME -I"$root/render2d" -I"$root/render3d" -I"$root/runtime" -I"$sokol" "$root/runtime/player.c" "$root/runtime/host_canvas.c" "$root/runtime/host_view3d.c" $render2d $render3d $engine_sources "$@" "$objdir/sokol_impl.o" -o "$out" -lm $libs
     outdir=$(dirname "$out")
     cp "$project" "$outdir/game.cwproj"   # the static player looks for game.cwproj next to itself
     if [ -d "$project_dir/scenes" ]; then rm -rf "$outdir/scenes"; cp -R "$project_dir/scenes" "$outdir/scenes"; fi

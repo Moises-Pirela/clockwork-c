@@ -13,13 +13,17 @@
  *   ... --headless N      run N ticks without a window and exit (self-check)
  *   ... --frames N        render N frames and exit (smoke test)
  *   ... --config FILE     rendering settings (default: the project's render.cfg, else tunable.cfg)
+ *   ... --renderer 2d|3d  override the project's renderer (3d: render3d's perspective view of Shape3D primitives)
  *
  * Keys: Space pause   N step   R reload the scene   F fit view   F11 fullscreen   Esc quit
- *       right/middle drag or arrow keys pan   wheel or +/- zoom
+ *       F3 toggles the 2D and 3D views   O (3D) toggles the orthographic projection
+ *       2D: right/middle drag or arrow keys pan, wheel or +/- zoom
+ *       3D: right drag orbits, middle drag pans, wheel dollies
  */
 #define _CRT_SECURE_NO_WARNINGS 1
 #include "cw_game.h"
 #include "host_canvas.h"
+#include "host_view3d.h"
 #include "render2d.h"
 #include "r2d_post.h"
 #include "r2d_lighting.h"
@@ -40,9 +44,13 @@ static struct {
     char config[CW_GAME_PATH_CAPACITY];
     unsigned frames, max_frames;
     host_canvas canvas;
+    host_view3d view3d;
+    cw_renderer_kind renderer;
+    int renderer_override;     /* -1: the project's */
     char status[200];
     float time;
 } app;
+static bool is_3d(void) { return app.renderer == CW_RENDERER_3D; }
 
 static void set_status(const char *text) {
     size_t n = strlen(text);
@@ -85,7 +93,7 @@ static void window_init(void) {
     desc.camera = r2d_camera_make(r2d_rect_center(b), 1.0f, false);
     desc.camera.min_zoom = 0.1f;
     desc.camera.max_zoom = 12.0f;
-    desc.camera_controls = true;
+    desc.camera_controls = !is_3d();   /* in 3D the view has the mouse */
     desc.pan_with_right_button = desc.pan_with_middle_button = desc.pan_with_arrows = true;
     desc.text_scale = 1.25f;
     desc.post_config = app.config;
@@ -94,23 +102,49 @@ static void window_init(void) {
     host_canvas_init(&app.canvas);
     app.canvas.pickable = false;
     if (app.project_open) host_canvas_set_assets(&app.canvas, &app.assets);
+    if (is_3d()) {
+        if (!host_view3d_init(&app.view3d)) { fputs("cannot set up the 3D renderer\n", stderr); app.failed = true; sapp_request_quit(); return; }
+        host_canvas_set_view3d(&app.canvas, &app.view3d);
+        host_view3d_frame_world(&app.view3d, &app.gw);
+    }
     r2d_camera_fit_rect(b, 24);
     app.ready = true;
+}
+static void fit_view(void) {
+    if (is_3d()) host_view3d_frame_world(&app.view3d, &app.gw);
+    else r2d_camera_fit_rect(bounds(), 24);
 }
 static void window_frame(void) {
     if (!app.ready) return;
     r2d_begin_frame();
-    if (r2d_frame_count() == 1) r2d_camera_fit_rect(bounds(), 24);
+    r2d_vec2 vp = r2d_viewport();
+    if (is_3d()) {   /* the 3D view fills the window; the player's text sits on top of it */
+        host_view3d_begin(&app.view3d, r2d_rect_make(0, 0, vp.x, vp.y));
+        host_view3d_controls(&app.view3d, true);
+    }
+    if (r2d_frame_count() == 1) fit_view();
     float dt = r2d_dt();
     app.time += dt;
     if (r2d_key_pressed(SAPP_KEYCODE_ESCAPE)) sapp_request_quit();
     if (r2d_key_pressed(SAPP_KEYCODE_SPACE)) { app.paused = !app.paused; cw_clock_reset(&app.gw.clock); set_status(app.paused ? "paused" : "running"); }
     if (r2d_key_pressed(SAPP_KEYCODE_N)) { app.paused = true; cw_game_world_tick(&app.gw, 1); }
     if (r2d_key_pressed(SAPP_KEYCODE_R)) load_scene();
-    if (r2d_key_pressed(SAPP_KEYCODE_F)) r2d_camera_fit_rect(bounds(), 24);
+    if (r2d_key_pressed(SAPP_KEYCODE_F)) fit_view();
     if (r2d_key_pressed(SAPP_KEYCODE_F11)) sapp_toggle_fullscreen();
+    if (r2d_key_pressed(SAPP_KEYCODE_F3)) {   /* the other view of the same world */
+        app.renderer = is_3d() ? CW_RENDERER_2D : CW_RENDERER_3D;
+        if (is_3d() && !app.view3d.ready && !host_view3d_init(&app.view3d)) { fputs("cannot set up the 3D renderer\n", stderr); app.renderer = CW_RENDERER_2D; }
+        host_canvas_set_view3d(&app.canvas, is_3d() ? &app.view3d : NULL);
+        r2d_set_camera_controls(!is_3d());
+        if (is_3d()) { host_view3d_begin(&app.view3d, r2d_rect_make(0, 0, vp.x, vp.y)); host_view3d_frame_world(&app.view3d, &app.gw); }
+        else fit_view();
+        set_status(is_3d() ? "3D view (F3: 2D)" : "2D view (F3: 3D)");
+    }
+    if (is_3d() && r2d_key_pressed(SAPP_KEYCODE_O)) {
+        host_view3d_set_orthographic(&app.view3d, !host_view3d_orthographic(&app.view3d));
+        set_status(host_view3d_orthographic(&app.view3d) ? "orthographic (O: perspective)" : "perspective (O: orthographic)");
+    }
     /* the interface covers the window; the mouse reaches its buttons through the engine's cw_ui system */
-    r2d_vec2 vp = r2d_viewport();
     cw_ui_screen screen = {0, 0, vp.x, vp.y};
     cw_game_world_set_ui_screen(&app.gw, screen);
     cw_game_world_ui_input(&app.gw, r2d_mouse().x, r2d_mouse().y, r2d_mouse_down(R2D_MOUSE_LEFT), r2d_mouse_pressed(R2D_MOUSE_LEFT), r2d_mouse_released(R2D_MOUSE_LEFT));
@@ -138,6 +172,7 @@ static void window_event(const sapp_event *event) { if (app.ready) r2d_handle_ev
 static void window_cleanup(void) {
     if (!app.ready) return;
     host_canvas_destroy(&app.canvas);
+    if (is_3d()) host_view3d_destroy(&app.view3d);
     r2d_shutdown();
     app.ready = false;
 }
@@ -196,6 +231,7 @@ static void exe_dir(const char *argv0, char *out, size_t capacity) {
 int main(int argc, char **argv) {
     const char *project = NULL, *module = NULL, *scene = NULL;
     int headless = -1;
+    app.renderer_override = -1;
     snprintf(app.config, sizeof(app.config), "tunable.cfg");
     for (int i = 1; i < argc; ++i) {
         const char *a = argv[i];
@@ -206,8 +242,9 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--config") == 0 && i + 1 < argc) snprintf(app.config, sizeof(app.config), "%s", argv[++i]);
         else if (strcmp(a, "--headless") == 0 && i + 1 < argc && parse_count(argv[++i], &n)) headless = (int)n;
         else if (strcmp(a, "--frames") == 0 && i + 1 < argc && parse_count(argv[++i], &n)) app.max_frames = n;
+        else if (strcmp(a, "--renderer") == 0 && i + 1 < argc && cw_renderer_parse(argv[i + 1], &app.renderer)) { app.renderer_override = (int)app.renderer; ++i; }
         else {
-            printf("usage: %s [--project game.cwproj] [--module lib%s] [--scene file.cwscene] [--headless N] [--frames N] [--config tunable.cfg]\n",
+            printf("usage: %s [--project game.cwproj] [--module lib%s] [--scene file.cwscene] [--headless N] [--frames N] [--config tunable.cfg] [--renderer 2d|3d]\n",
                    argv[0], cw_game_library_suffix());
             return strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0 ? 0 : 2;
         }
@@ -228,6 +265,7 @@ int main(int argc, char **argv) {
     if (project) {
         if (!cw_project_load(&app.project, project, error, sizeof(error))) { fprintf(stderr, "%s\n", error); return 1; }
         app.project_open = true;
+        if (app.renderer_override < 0) app.renderer = app.project.renderer;
         if (!module) module = app.project.module;
         if (!scene && app.project.main_scene[0]) scene = app.project.main_scene;
         /* the project's assets, for game code that resolves asset ids */

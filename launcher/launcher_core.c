@@ -277,10 +277,14 @@ bool lc_name_valid(const char *name) {
         if (!isalnum((unsigned char)*p) && *p != '_') return false;
     return true;
 }
-static bool read_template(const lc_launcher *l, const char *file, const char *name, char **out) {
+const char *lc_template_dir(lc_template kind) { return kind == LC_TEMPLATE_3D ? "launcher/template3d" : "launcher/template"; }
+const char *lc_template_name(lc_template kind) { return kind == LC_TEMPLATE_3D ? "3D" : "2D"; }
+static bool read_template(const lc_launcher *l, lc_template kind, const char *file, const char *name, char **out) {
     char path[CW_GAME_PATH_CAPACITY];
     copy_str(path, sizeof(path), l->engine_root);
-    append_str(path, sizeof(path), "/launcher/template/");
+    append_str(path, sizeof(path), "/");
+    append_str(path, sizeof(path), lc_template_dir(kind));
+    append_str(path, sizeof(path), "/");
     append_str(path, sizeof(path), file);
     cw_buffer text;
     cw_file_error err;
@@ -375,7 +379,8 @@ static bool copy_template_tree(const char *from, const char *to, int depth) {
 #endif
     return ok;
 }
-bool lc_create(lc_launcher *l, const char *parent, const char *name, size_t *index) {
+bool lc_create(lc_launcher *l, const char *parent, const char *name, lc_template kind, size_t *index) {
+    if ((unsigned)kind >= LC_TEMPLATE_KINDS) kind = LC_TEMPLATE_2D;
     if (!lc_name_valid(name)) { lc_status(l, true, "'%s' is not a valid project name (letters, digits and _ , starting with a letter)", name ? name : ""); return false; }
     if (!parent || !*parent) { lc_status(l, true, "choose a directory for the project"); return false; }
     if (!dir_exists(parent)) { lc_status(l, true, "directory %s does not exist", parent); return false; }
@@ -385,9 +390,9 @@ bool lc_create(lc_launcher *l, const char *parent, const char *name, size_t *ind
     append_str(dir, sizeof(dir), name);
     if (dir_exists(dir)) { lc_status(l, true, "%s already exists", dir); return false; }
     char *game = NULL, *scene_raw = NULL, *scene = NULL;
-    if (!read_template(l, "game.c", name, &game) || !read_template(l, "main.cwscene", name, &scene_raw)) {
+    if (!read_template(l, kind, "game.c", name, &game) || !read_template(l, kind, "main.cwscene", name, &scene_raw)) {
         free(game);
-        lc_status(l, true, "cannot read the templates under %s/launcher/template", l->engine_root);
+        lc_status(l, true, "cannot read the templates under %s/%s", l->engine_root, lc_template_dir(kind));
         return false;
     }
     patch_scene_game(scene_raw, name, &scene);
@@ -402,13 +407,14 @@ bool lc_create(lc_launcher *l, const char *parent, const char *name, size_t *ind
     ok = ok && write_text(file, scene);
     /* the rest of the template (starter images, materials, ...) is copied verbatim */
     copy_str(file, sizeof(file), l->engine_root);
-    append_str(file, sizeof(file), "/launcher/template");
+    append_str(file, sizeof(file), "/");
+    append_str(file, sizeof(file), lc_template_dir(kind));
     ok = ok && copy_template_tree(file, dir, 0);
     char project[1024];
     snprintf(project, sizeof(project),
              "cwproject 1\nname %s\n# the shared library the editor and player load (platform suffix added)\nmodule build/%s_game\n"
-             "# sources compiled into the module and into exported games\nsource %s_game.c\nscenes scenes\nmain_scene scenes/main.cwscene\n",
-             name, name, name);
+             "# sources compiled into the module and into exported games\nsource %s_game.c\nscenes scenes\nmain_scene scenes/main.cwscene\n%s",
+             name, name, name, kind == LC_TEMPLATE_3D ? "# how the hosts view the world: 2d or 3d\nrenderer 3d\n" : "");
     copy_str(file, sizeof(file), dir); append_str(file, sizeof(file), "/"); append_str(file, sizeof(file), name); append_str(file, sizeof(file), ".cwproj");
     ok = ok && write_text(file, project);
     free(game);
@@ -419,7 +425,7 @@ bool lc_create(lc_launcher *l, const char *parent, const char *name, size_t *ind
     lc_touch(l, (size_t)at);
     lc_save(l);
     if (index) *index = 0;
-    lc_status(l, false, "created %s in %s (build it to open it)", name, dir);
+    lc_status(l, false, "created the %s project %s in %s (build it to open it)", lc_template_name(kind), name, dir);
     return true;
 }
 const char *lc_template_source(void) { return "launcher/template/game.c"; }

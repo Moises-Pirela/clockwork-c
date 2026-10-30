@@ -93,8 +93,8 @@ int main(int argc, char **argv) {
     /* creating a project from the template */
     CHECK(lc_name_valid("my_game") && !lc_name_valid("1bad") && !lc_name_valid("a-b") && !lc_name_valid("") && !lc_name_valid("has space"), "name rules");
     size_t made = 99;
-    CHECK(!lc_create(l, scratch, "bad name", &made), "invalid names are refused");
-    CHECK(!lc_create(l, "/nonexistent-dir", "fine", &made), "missing parent refused");
+    CHECK(!lc_create(l, scratch, "bad name", LC_TEMPLATE_2D, &made), "invalid names are refused");
+    CHECK(!lc_create(l, "/nonexistent-dir", "fine", LC_TEMPLATE_2D, &made), "missing parent refused");
     char dir[CW_GAME_PATH_CAPACITY];
     snprintf(dir, sizeof(dir), "%s/lc_test_game", scratch);
     char rm[CW_GAME_PATH_CAPACITY + 16];
@@ -104,9 +104,9 @@ int main(int argc, char **argv) {
     snprintf(rm, sizeof(rm), "rm -rf \"%s\"", dir);
 #endif
     (void)!system(rm);
-    CHECK(lc_create(l, scratch, "lc_test_game", &made), "create: %s", l->status);
+    CHECK(lc_create(l, scratch, "lc_test_game", LC_TEMPLATE_2D, &made), "create: %s", l->status);
     CHECK(made == 0 && l->count >= 3 && strcmp(l->entries[0].project.name, "lc_test_game") == 0, "new project at the top");
-    CHECK(!lc_create(l, scratch, "lc_test_game", &made), "creating twice is refused");
+    CHECK(!lc_create(l, scratch, "lc_test_game", LC_TEMPLATE_2D, &made), "creating twice is refused");
     lc_entry *e = &l->entries[0];
     CHECK(e->loadable && !e->module_built && e->scene_count == 1 && strcmp(e->scenes[0], "main.cwscene") == 0, "fresh project: loadable, unbuilt, one scene");
     CHECK(e->project.source_count == 1 && strstr(e->project.sources[0], "lc_test_game_game.c"), "source named after the project");
@@ -171,6 +171,54 @@ int main(int argc, char **argv) {
         cw_game_close(&game);
     }
     (void)!system(rm);
+
+    /* the 3D template: a renderer 3d project with brushes, lights and materials */
+    {
+        char dir3[CW_GAME_PATH_CAPACITY], rm3[CW_GAME_PATH_CAPACITY + 16];
+        snprintf(dir3, sizeof(dir3), "%s/lc_test_level", scratch);
+#ifdef _WIN32
+        snprintf(rm3, sizeof(rm3), "rmdir /s /q \"%s\"", dir3);
+#else
+        snprintf(rm3, sizeof(rm3), "rm -rf \"%s\"", dir3);
+#endif
+        (void)!system(rm3);
+        CHECK(strcmp(lc_template_dir(LC_TEMPLATE_3D), "launcher/template3d") == 0 && strcmp(lc_template_name(LC_TEMPLATE_3D), "3D") == 0, "the 3D template's names");
+        CHECK(lc_create(l, scratch, "lc_test_level", LC_TEMPLATE_3D, &made), "create a 3D project: %s", l->status);
+        lc_entry *e3 = &l->entries[0];
+        CHECK(e3->loadable && e3->project.renderer == CW_RENDERER_3D && strcmp(e3->project.name, "lc_test_level") == 0, "the new project is viewed in 3D");
+        char path[CW_GAME_PATH_CAPACITY + 64];
+        snprintf(path, sizeof(path), "%s/materials/bricks.cwmat", e3->project.dir);
+        FILE *f3 = fopen(path, "rb");
+        CHECK(f3 != NULL, "the 3D template's materials came along");
+        if (f3) fclose(f3);
+        cw_assets assets;
+        cw_assets_init(&assets, e3->project.assets);
+        CHECK(cw_assets_load(&assets, NULL, 0) && cw_assets_find_name(&assets, "grass.cwmat") && cw_assets_find_name(&assets, "tiles.png"), "its manifest lists the materials and images for the player");
+        cw_assets_destroy(&assets);
+        CHECK(lc_build(l, 0) && e3->module_built, "build the 3D project: %s", l->status);
+        if (e3->module_built) {
+            cw_game game;
+            char error[256];
+            CHECK(cw_game_open(&game, e3->project.module, error, sizeof(error)), "open the built 3D module: %s", error);
+            if (game.module) {
+                CHECK(strcmp(game.module->name, "lc_test_level") == 0 && game.module->prefab_count == 6, "the 3D starter named after the project");
+                cw_game_world gw;
+                CHECK(cw_game_world_init(&gw, game.module, error, sizeof(error)), "bind");
+                cw_scene_result r;
+                CHECK(cw_game_world_load_scene(&gw, e3->project.main_scene, NULL, &r) && r.entities == 17 && !r.warnings, "the 3D scene loads: %s (%zu warnings)", r.message, r.warnings);
+                cw_game_world_settle(&gw);
+                CHECK(cw_comp_has(&gw.world, 5, gw.brush_ct) && cw_brush_clip_count(cw_comp_ptr(&gw.world, 5, gw.brush_ct)) == 1, "its ramp is a wedge brush");
+                CHECK(cw_comp_has(&gw.world, 11, gw.light3d_ct) && ((cw_light3d *)cw_comp_ptr(&gw.world, 11, gw.light3d_ct))->shadows, "its sun casts shadows");
+                CHECK(cw_comp_has(&gw.world, 15, gw.sky3d_ct) && ((cw_sky3d *)cw_comp_ptr(&gw.world, 15, gw.sky3d_ct))->sun_intensity == 3, "its sky is a gradient with a sun");
+                CHECK(cw_comp_has(&gw.world, 16, gw.decal3d_ct) && ((cw_decal3d *)cw_comp_ptr(&gw.world, 16, gw.decal3d_ct))->material == cw_asset_id("scorch.cwmat"), "its scorch is a decal");
+                cw_game_world_tick(&gw, 60);
+                CHECK(cw_world_entity_count(&gw.world) == 17, "and simulates");
+                cw_game_world_destroy(&gw);
+            }
+            cw_game_close(&game);
+        }
+        (void)!system(rm3);
+    }
     remove(registry);
     free(l);
     if (failures) { printf("%d of %d checks failed\n", failures, checks); return 1; }

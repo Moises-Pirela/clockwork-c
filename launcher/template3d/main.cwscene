@@ -1,0 +1,86 @@
+cwscene 1
+game starter 1
+tick 0
+next_id 17
+
+# a small brush-built room on a grass ground; the editor's brush tool (B)
+# adds blocks and wedges, the clip tool (C) cuts them, the texture tool (T)
+# and the paint tool (P) dress them
+entity 0 "ground"
+  Position x=0 y=-0.1 z=0
+  Brush width=16 height=0.2 depth=16 mat_east=none mat_west=none mat_top=@grass.cwmat mat_bottom=none mat_south=none mat_north=none texture_scale=2 subdivisions=8 r=255 g=255 b=255
+
+entity 1 "back wall"
+  Position x=0 y=1.5 z=-5.5
+  Brush width=10 height=3 depth=1 mat_east=@bricks.cwmat mat_west=@bricks.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@bricks.cwmat mat_north=@bricks.cwmat texture_scale=2 subdivisions=4 r=255 g=255 b=255
+
+entity 2 "side wall"
+  Position x=-5.5 y=1.5 z=-2
+  Brush width=1 height=3 depth=6 mat_east=@bricks.cwmat mat_west=@bricks.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@bricks.cwmat mat_north=@bricks.cwmat texture_scale=2 subdivisions=4 r=255 g=255 b=255
+
+entity 3 "floor"
+  Position x=0 y=0.05 z=-2.5
+  Brush width=10 height=0.1 depth=5 mat_east=@tiles.cwmat mat_west=@tiles.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@tiles.cwmat mat_north=@tiles.cwmat texture_scale=1 subdivisions=8 r=255 g=255 b=255
+
+entity 4 "ledge"
+  Position x=3.5 y=0.5 z=-4
+  Brush width=3 height=1 depth=2 mat_east=@tiles.cwmat mat_west=@tiles.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@tiles.cwmat mat_north=@tiles.cwmat texture_scale=1 subdivisions=2 r=255 g=255 b=255
+
+entity 5 "ramp"
+  Position x=0.75 y=0.5 z=-4
+  Brush width=2.5 height=1 depth=2 mat_east=@tiles.cwmat mat_west=@tiles.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@tiles.cwmat mat_north=@tiles.cwmat mat_clip1=@tiles.cwmat texture_scale=1 subdivisions=2 r=255 g=255 b=255 clips=6ya+vqawbT8AAAAAAAAAAA==
+
+entity 6 "cube"
+  Position x=-2.5 y=0.6 z=-1.5
+  Shape3D kind=cube width=1 height=1 depth=1 rx=0 ry=0 rz=0 r=110 g=150 b=235 a=255 checker=0 wireframe=false material=none
+
+entity 7 "ball"
+  Position x=0 y=1 z=-1
+  Shape3D kind=sphere width=1 height=1 depth=1 rx=0 ry=0 rz=0 r=235 g=120 b=90 a=255 checker=0 wireframe=false material=@tiles.cwmat
+  Bob amplitude=0.5 speed=1.5 base=1
+
+entity 8 "spinning slab"
+  Position x=2.5 y=0.3 z=-0.5
+  Shape3D kind=cube width=2 height=0.4 depth=1 rx=0 ry=0.5 rz=0 r=240 g=200 b=90 a=255 checker=0 wireframe=false material=none
+  Spin speed=0.8
+
+entity 9 "capsule"
+  Position x=-1 y=1 z=1.5
+  Shape3D kind=capsule width=0.4 height=1.2 depth=0.4 rx=0 ry=0 rz=0 r=120 g=200 b=140 a=255 checker=0 wireframe=false material=none
+
+entity 10 "lamp"
+  Position x=-2 y=2.4 z=-3
+  Shape3D kind=sphere width=0.25 height=0.25 depth=0.25 rx=0 ry=0 rz=0 r=255 g=230 b=160 a=255 checker=0 wireframe=false material=@glow.cwmat
+  Light3D kind=point r=255 g=215 b=150 intensity=1.6 range=9 pitch=0 yaw=0 cone=0.8 shadows=false
+
+entity 11 "sun"
+  Position x=6 y=6 z=6
+  Light3D kind=directional r=255 g=245 b=225 intensity=0.9 pitch=-0.9 yaw=-2.3 cone=0.8 range=10 shadows=true
+
+entity 12 "sky light"
+  Position x=0 y=8 z=0
+  Light3D kind=ambient r=120 g=140 b=190 intensity=0.35 pitch=0 yaw=0 cone=0.8 range=10 shadows=false
+
+# a decal: the scorch material projected onto the floor under the lamp (the
+# decal tool (D) puts more on any surface)
+entity 16 "scorch"
+  Position x=-2 y=0.1 z=-3
+  Decal3D width=1.5 height=1.5 depth=0.4 rx=0 ry=0.3 rz=0 r=255 g=255 b=255 a=255 material=@scorch.cwmat max_angle=1.3962634
+
+# the background: a gradient with a sun disc along the directional light;
+# six square images (image_east ... image_north) would wrap the scene instead
+entity 15 "sky"
+  Sky3D zenith_r=70 zenith_g=110 zenith_b=190 horizon_r=190 horizon_g=210 horizon_b=235 ground_r=60 ground_g=58 ground_b=62 sun_size=0.03 sun_intensity=3 image_east=none image_west=none image_up=none image_down=none image_south=none image_north=none
+
+# the interface: entities with the engine's Ui components, laid out on the
+# project's reference resolution (ui 1280 720 in the .cwproj) and scaled to
+# any window; it draws over the 3D view
+entity 13 "title"
+  UiRect parent=-1 anchor_min_x=0 anchor_min_y=0 anchor_max_x=0 anchor_max_y=0 left=16 top=12 right=416 bottom=44 order=0 visible=true
+  UiText text="starter: right drag orbits" size=2 r=235 g=238 b=245 a=255 align=left valign=middle
+
+entity 14 "faster button"
+  UiRect parent=-1 anchor_min_x=1 anchor_min_y=0 anchor_max_x=1 anchor_max_y=0 left=-196 top=12 right=-16 bottom=56 order=0 visible=true
+  UiImage material=none r=70 g=110 b=170 a=255 border=0 fill_mode=none fill=1
+  UiButton enabled=true action=1 hover_r=230 hover_g=230 hover_b=230 press_r=160 press_g=160 press_b=160
+  UiText text="faster" size=1.5 r=255 g=255 b=255 a=255 align=center valign=middle

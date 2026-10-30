@@ -1,0 +1,19 @@
+cwproject 1
+name sandbox3d
+# the shared library the editor and player load (platform suffix added)
+module build/sandbox3d_game
+# sources compiled into the module and into exported games
+source sandbox3d_game.c
+scenes scenes
+main_scene scenes/playground.cwscene
+# rendering settings (render2d tunables, edited in the editor's settings panel)
+render render.cfg
+# the asset manifest (the editor's asset browser maintains it)
+assets assets.cwassets
+# the player's window
+window 1280 800
+title Clockwork sandbox 3D
+# the interface's reference resolution and how it scales to the window (expand|shrink|width|height|pixels)
+ui 1280 720 expand
+# how the hosts view the world: 2d (render2d's camera) or 3d (render3d: Shape3D primitives, a perspective view)
+renderer 3d

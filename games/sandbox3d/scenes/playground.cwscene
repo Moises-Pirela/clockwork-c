@@ -1,0 +1,106 @@
+cwscene 1
+game sandbox3d 1
+tick 0
+next_id 25
+
+entity 0 "ground"
+  Position x=0 y=-0.1 z=0
+  Brush width=20 height=0.2 depth=20 mat_east=none mat_west=none mat_top=@grass.cwmat mat_bottom=none mat_south=none mat_north=none texture_scale=2 subdivisions=8 r=255 g=255 b=255
+
+entity 1 "cube"
+  Position x=-3 y=0.5 z=-2
+  Shape3D kind=cube width=1 height=1 depth=1 rx=0 ry=0 rz=0 r=110 g=150 b=235 a=255 checker=0 wireframe=false material=none
+
+entity 2 "sphere"
+  Position x=0 y=1 z=0
+  Shape3D kind=sphere width=1 height=1 depth=1 rx=0 ry=0 rz=0 r=235 g=120 b=90 a=255 checker=0 wireframe=false material=@tiles.cwmat
+  Bob amplitude=0.5 speed=1.5 base=1
+
+entity 3 "capsule"
+  Position x=3 y=1.1 z=-1
+  Shape3D kind=capsule width=0.5 height=1.2 depth=0.5 rx=0 ry=0 rz=0 r=120 g=200 b=140 a=255 checker=0 wireframe=false material=none
+
+entity 4 "spinning slab"
+  Position x=-2.5 y=0.2 z=3
+  Shape3D kind=cube width=2 height=0.4 depth=1 rx=0 ry=0.5 rz=0 r=240 g=200 b=90 a=255 checker=0 wireframe=false material=none
+  Spin speed=0.8
+
+entity 5 "glass"
+  Position x=2 y=1 z=2.5
+  Shape3D kind=cube width=1.5 height=2 depth=0.2 rx=0 ry=-0.6 rz=0 r=140 g=220 b=255 a=110 checker=0 wireframe=false material=none
+
+entity 6 "wire sphere"
+  Position x=5 y=1.5 z=3
+  Shape3D kind=sphere width=1.5 height=1.5 depth=1.5 rx=0 ry=0 rz=0 r=255 g=255 b=255 a=255 checker=0 wireframe=true material=none
+
+entity 7 "tilted plane"
+  Position x=-5.5 y=0.8 z=0.5
+  Shape3D kind=plane width=3 height=0 depth=2 rx=0 ry=0 rz=0.5 r=200 g=190 b=150 a=255 checker=2 wireframe=false material=none
+
+entity 8 "lying capsule"
+  Position x=1 y=0.4 z=-4
+  Shape3D kind=capsule width=0.4 height=2 depth=0.4 rx=0 ry=0 rz=1.5707964 r=200 g=130 b=230 a=255 checker=0 wireframe=false material=none
+
+entity 9 "north wall"
+  Position x=0 y=1.5 z=-7.5
+  Brush width=12 height=3 depth=1 mat_east=@bricks.cwmat mat_west=@bricks.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@bricks.cwmat mat_north=@bricks.cwmat texture_scale=2 subdivisions=4 r=255 g=255 b=255
+
+entity 10 "west wall"
+  Position x=-6.5 y=1.5 z=-3
+  Brush width=1 height=3 depth=8 mat_east=@bricks.cwmat mat_west=@bricks.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@bricks.cwmat mat_north=@bricks.cwmat texture_scale=2 subdivisions=4 r=255 g=255 b=255
+
+entity 11 "ledge"
+  Position x=4.5 y=0.5 z=-6
+  Brush width=3 height=1 depth=2 mat_east=@tiles.cwmat mat_west=@tiles.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@tiles.cwmat mat_north=@tiles.cwmat texture_scale=1 subdivisions=2 r=255 g=255 b=255
+
+entity 12 "step"
+  Position x=4.5 y=0.25 z=-4.25
+  Brush width=3 height=0.5 depth=1.5 mat_east=@tiles.cwmat mat_west=@tiles.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@tiles.cwmat mat_north=@tiles.cwmat texture_scale=1 subdivisions=2 r=255 g=255 b=255
+
+entity 13 "pillar"
+  Position x=-2 y=1.5 z=-5.5
+  Brush width=0.8 height=3 depth=0.8 mat_east=@bricks.cwmat mat_west=@bricks.cwmat mat_top=@bricks.cwmat mat_bottom=none mat_south=@bricks.cwmat mat_north=@bricks.cwmat texture_scale=1 subdivisions=2 r=220 g=210 b=200
+
+entity 14 "lamp"
+  Position x=-1.5 y=2.4 z=-3.5
+  Shape3D kind=sphere width=0.25 height=0.25 depth=0.25 rx=0 ry=0 rz=0 r=255 g=230 b=160 a=255 checker=0 wireframe=false material=@glow.cwmat
+  Light3D kind=point r=255 g=215 b=150 intensity=1.6 range=9 pitch=0 yaw=0 cone=0.8 shadows=true
+
+entity 15 "sun"
+  Position x=6 y=6 z=6
+  Light3D kind=directional r=255 g=245 b=225 intensity=0.9 pitch=-0.9 yaw=-2.3 cone=0.8 range=10 shadows=true
+
+entity 16 "sky light"
+  Position x=0 y=8 z=0
+  Light3D kind=ambient r=120 g=140 b=190 intensity=0.35 pitch=0 yaw=0 cone=0.8 range=10
+
+entity 17 "spot"
+  Position x=3 y=3.5 z=-5.5
+  Light3D kind=spot r=160 g=220 b=255 intensity=3 range=8 pitch=-1.2 yaw=0.2 cone=0.9 shadows=true
+
+entity 18 "floor tiles"
+  Position x=0 y=0.05 z=-4
+  Brush width=12 height=0.1 depth=6 mat_east=@tiles.cwmat mat_west=@tiles.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@tiles.cwmat mat_north=@tiles.cwmat texture_scale=1 subdivisions=8 r=255 g=255 b=255
+
+entity 19 "ramp"
+  Position x=1.75 y=0.5 z=-6
+  Brush width=2.5 height=1 depth=2 mat_east=@tiles.cwmat mat_west=@tiles.cwmat mat_top=@tiles.cwmat mat_bottom=none mat_south=@tiles.cwmat mat_north=@tiles.cwmat mat_clip1=@tiles.cwmat texture_scale=1 subdivisions=2 r=255 g=255 b=255 clips=6ya+vqawbT8AAAAAAAAAAA==
+
+entity 20 "column"
+  Position x=-5 y=1.5 z=-6
+  Brush width=1 height=3 depth=1 mat_east=@bricks.cwmat mat_west=@bricks.cwmat mat_top=@bricks.cwmat mat_bottom=none mat_south=@bricks.cwmat mat_north=@bricks.cwmat mat_clip1=@bricks.cwmat mat_clip2=@bricks.cwmat texture_scale=1 subdivisions=2 r=220 g=210 b=200 clips=9AQ1PwAAAAD0BDU/oJkZP/QENb8AAAAA9AQ1v6CZGT8=
+
+entity 21 "sky"
+  Sky3D zenith_r=70 zenith_g=110 zenith_b=190 horizon_r=190 horizon_g=210 horizon_b=235 ground_r=60 ground_g=58 ground_b=62 sun_size=0.03 sun_intensity=3 image_east=@sky_east.png image_west=@sky_west.png image_up=@sky_up.png image_down=@sky_down.png image_south=@sky_south.png image_north=@sky_north.png
+
+entity 22 "scorch"
+  Position x=-1.5 y=0.1 z=-3.5
+  Decal3D width=1.6 height=1.6 depth=0.4 rx=0 ry=0.4 rz=0 r=255 g=255 b=255 a=255 material=@scorch.cwmat max_angle=1.3962634
+
+entity 23 "sign"
+  Position x=-1 y=1.8 z=-7
+  Decal3D width=1 height=1 depth=0.5 rx=1.5707964 ry=0 rz=0 r=255 g=255 b=255 a=255 material=@sign.cwmat max_angle=1.3962634
+
+entity 24 "burn on the grass"
+  Position x=-4.5 y=0 z=1.5
+  Decal3D width=2.2 height=2.2 depth=0.6 rx=0 ry=-0.8 rz=0 r=255 g=200 b=180 a=220 material=@scorch.cwmat max_angle=1.3962634

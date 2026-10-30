@@ -246,6 +246,25 @@ void r2d_end_frame(void);
 void r2d_set_clear_color(r2d_color color);
 void r2d_set_text_scale(float scale);   /* takes effect next frame */
 
+/* An underlay is another renderer (render3d) whose image goes beneath
+ * everything render2d draws. `prepare` runs in r2d_end_frame before the
+ * scene pass opens (offscreen rendering belongs there); `draw` runs first
+ * inside the scene pass with that pass's formats, so the underlay can
+ * composite itself under the world layer, the sprites and the overlays,
+ * and through the post-process stack when it is active. */
+typedef struct {
+    int color_format, depth_format;   /* sg_pixel_format values of the pass being drawn */
+    int sample_count;
+    r2d_vec2 viewport;                /* logical pixels */
+    bool post_processed;              /* the scene goes through the post-process stack this frame */
+} r2d_pass_info;
+typedef struct {
+    void *user;
+    void (*prepare)(void *user);
+    void (*draw)(void *user, const r2d_pass_info *info);
+} r2d_underlay;
+void r2d_set_underlay(const r2d_underlay *underlay);   /* NULL removes it */
+
 /* ---------------------------------------------------------------------------
  * Viewport and camera
  * ------------------------------------------------------------------------- */
@@ -255,6 +274,7 @@ float r2d_dt(void);                 /* seconds since the previous frame, clamped
 uint64_t r2d_frame_count(void);
 
 r2d_camera *r2d_camera_ptr(void);   /* the current camera, editable */
+void r2d_set_camera_controls(bool enabled);   /* the built-in controls, on or off at run time (e.g. while a 3D view has the mouse) */
 void r2d_set_camera(r2d_camera camera);
 void r2d_camera_reset(void);        /* back to the camera given at setup */
 void r2d_camera_zoom_around(r2d_vec2 screen_anchor, float factor);
